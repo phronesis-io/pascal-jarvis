@@ -1,6 +1,7 @@
 # Unified Model Runtime Usage
 
-**Status:** implemented in repository; release pending
+**Status:** deployed with PR #129--#131; provider-neutral execution
+orchestration remains a separate Phase 3 objective
 **Date:** 2026-08-27
 
 ## Problem

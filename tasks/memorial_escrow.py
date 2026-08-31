@@ -9,14 +9,14 @@ real asks lost in a pile indistinguishable from noise.
 Two outcomes, deliberately different:
   留中 (lapse)  alerts/notices past their deadline, and decisions so old nobody
                 will ever answer them, are archived. Terminal, silent, counted.
-  docket        while any decision is past its deadline but still answerable,
-                ONE morning card reports the whole open backlog — numbers from
-                memorial.ledger_accounting(), the same 口径 every ledger query
-                uses (REQ-122). Never re-pushed individually: that is the card
-                storm of 7/22.
+  docket        while any delivered decision is past its deadline but still
+                answerable, ONE morning card names only those open asks. An
+                unsent card cannot create an obligation for the owner, and
+                notices/alerts keep their own lifecycle. Never re-pushed
+                individually: that is the card storm of 7/22.
 
 Tier-0 by design — pure arithmetic over timestamps. No model call decides
-whether Pascal answered something.
+whether the owner answered something.
 """
 from __future__ import annotations
 
@@ -68,10 +68,9 @@ def run(now=None, send: bool = True) -> dict:
     if _already_sent_today(states, today):
         return summary
 
-    # The lapse loop above just moved rows; the docket must count the ledger
-    # as it stands NOW, through the same accounting every other reporter uses
-    # (REQ-122) — not the pre-sweep snapshot. The 📡 signal line is computed
-    # inside escrow_docket from these same states, never passed in.
+    # The lapse loop above just moved rows; the docket must read the ledger as
+    # it stands NOW. escrow_docket applies the stricter human-obligation
+    # predicate: delivered unresolved decisions only.
     fresh = memorial.list_memorials()
     title, body = memorial.escrow_docket(fresh, now=now)
     # No 去-somewhere button: the web desk is retired (REQ-120) and a URL
@@ -81,6 +80,10 @@ def run(now=None, send: bool = True) -> dict:
         title=title,
         body=body,
         work_receipt="完成待批台账折叠、过期清理和重复事项核对",
+        owner_need="decision_batch",
+        why_now="晨间批次窗口到了，多个已送达判断可以一次处理",
+        owner_action="一次处理这些判断，或选择先都放着",
+        silence_cost="不提示会让多个已送达判断在待批状态继续积压",
         # 「先都放着」 is the escape hatch that keeps this from nagging forever:
         # the whole docket can be declined in one tap. Plain wording, not
         # court jargon (owner 2026-08-11: 「以后别说黑话了」).

@@ -318,6 +318,33 @@ def test_primary_spend_limit_trips_gate_and_reaches_backup(
     assert model_fallback.gate(tmp_path, probe=False) == "backup"
 
 
+def test_tool_capable_failure_does_not_replay_on_backup(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("CLAUDE_BACKUP_ENABLED", "true")
+    monkeypatch.setenv("CLAUDE_BACKUP_AUTH_TOKEN", "backup-token")
+    monkeypatch.setenv("CLAUDE_BACKUP_BASE_URL", "https://backup.example")
+    calls = []
+
+    def runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return _result(
+            command, 1, stdout="You've hit your monthly spend limit"
+        )
+
+    result = aux_model.run_auxiliary_model(
+        "write something",
+        root=tmp_path,
+        allow_tools=True,
+        runner=runner,
+    )
+
+    assert result.status == "ambiguous"
+    assert result.terminal_reason == "account_limit"
+    assert len(calls) == 1
+    assert model_fallback.gate(tmp_path, probe=False) == "backup"
+
+
 def test_error_stdout_is_never_returned_as_content(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 

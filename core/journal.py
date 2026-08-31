@@ -1,8 +1,8 @@
-"""Append-only writer for Pascal's persistent 每日复盘日志 (Feishu docx).
+"""Append-only writer forthe owner's persistent 每日复盘日志 (Feishu docx).
 
 The journal is a single private Feishu document (token in jarvis.yaml →
 journal.doc_token). daily-reflect appends one dated section per day so the
-reflection accumulates into a longitudinal, searchable record Pascal reads
+reflection accumulates into a longitudinal, searchable record the owner reads
 on Feishu mobile — the doc-centric collaboration surface from the PRD.
 
 Design notes:
@@ -50,7 +50,7 @@ def append_entry(content: str, heading: str | None = None, timeout: int = 60) ->
         heading = f"## {now_local_str('%Y-%m-%d')} {wd}".rstrip()
 
     # heading == "" → append a sub-entry under the current day (no new H2),
-    # e.g. Pascal's own reply quoted back into today's reflection.
+    # e.g. the owner's own reply quoted back into today's reflection.
     if heading:
         block = f"\n{heading}\n\n{content}\n\n---\n"
     else:

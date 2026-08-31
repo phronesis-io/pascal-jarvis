@@ -395,6 +395,11 @@ class ActionProcessor:
             ).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return "❌ EigenFlux 消息正文编码无效，未发送"
+        from core.outbound_privacy import outbound_content_gate
+
+        privacy_rule = outbound_content_gate(content)
+        if privacy_rule:
+            return f"❌ EigenFlux 消息触发出站隐私规则 {privacy_rule}，未发送"
         try:
             receipt = EigenFluxMessenger(root=self.jarvis_dir).send(
                 recipient,
@@ -528,7 +533,7 @@ class ActionProcessor:
         「N 件事等你拍板」 that archived a different N would be one more
         number nobody can trust. The set is recomputed at tap time rather
         than read from the card: a card can sit unread for hours, and
-        anything Pascal answered (or that resolved itself upstream) in the
+        anything the owner answered (or that resolved itself upstream) in the
         meantime must not be archived as unanswered. Bulk-archiving the
         owner's decision queue is owner-only.
         """

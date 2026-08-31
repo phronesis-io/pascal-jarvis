@@ -4,7 +4,7 @@ Evidence (6/30 + 7/1): 8 cron occurrences were retired by
 `_skip_stale_cron_occurrence` during heartbeat stalls; the
 `intent_occurrence_skipped` events had NO consumer anywhere, so a credit-card
 bill reminder and a Tushare token reminder vanished without a
-trace until Pascal noticed himself.
+trace until the owner noticed himself.
 
 This module is the consumer. It scans sched_events for skip-class events in
 the last 24h and writes the shared SQLite intent breach state (the
@@ -18,7 +18,7 @@ skipped intent's `category` (behavioral_rules §5 — the existing taxonomy):
   - category='external' occurrences fold into ONE aggregate entry
     ("停摆期间跳过了 N 件事").
   - context/healing/autonomous/none/unknown and KNOWN-absent rows are consumed
-    silently: they are operational history, not a new demand on Pascal's
+    silently: they are operational history, not a new demand on the owner's
     attention.
   - an event whose category lookup FAILED (db unreadable, not row-absent) is
     deferred untouched and retried next scan — never consumed on a failure
@@ -299,7 +299,7 @@ def queue_digest(jarvis_dir: Path = ROOT, force: bool = False,
                 aggregate.append(e)
             else:
                 # Missing/deleted rows and all may_notify=false categories are
-                # operational history, not a demand on Pascal's attention.
+                # operational history, not a demand on the owner's attention.
                 silent.append(e)
         if deferred:
             print(f"[skip-digest] {deferred} event(s) deferred — "
@@ -405,7 +405,7 @@ def diag_line(jarvis_dir: Path = ROOT) -> str:
         if n > 0:
             # Boss-facing ⚠️ line (selfmon card + guardian relay): no internal
             # event names — a card literally showed「intent_occurrence_skipped
-            # / expires_at_lapsed」to Pascal (2026-08-24 audit). The event
+            # / expires_at_lapsed」to the owner(2026-08-24 audit). The event
             # classes live in this module's docstring for whoever debugs.
             return (f"⚠️ 过去24小时有 {n} 个定时提醒因为系统停摆被跳过"
                     "——汇总/补发卡片应已排队，请核对确实发出")

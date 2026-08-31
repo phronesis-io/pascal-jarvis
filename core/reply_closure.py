@@ -1,19 +1,19 @@
 """Reply-based intent closure (REQ-64) — deterministic, no Feishu button backend.
 
 In the entire live record, ALL closure events were via cli/ttl — ZERO via button
-or reply. Pascal had no working way to close a loop: the card buttons depend on
+or reply. the owner had no working way to close a loop: the card buttons depend on
 the Feishu callback backend, and there was no reply parser at all. So health
 items he asked for rot in 'awaiting'.
 
-This module classifies Pascal's reply to a closure-question card into
+This module classifies the owner's reply to a closure-question card into
 done / recorded(=did-not-do, but noted) / na(=stop chasing), so bot.sh can call
 record_closure(via='reply') DETERMINISTICALLY when the signal is clear, and fall
 back to the main-session LLM only when it's genuinely ambiguous. Keyword-based,
 fully testable, never raises.
 
 Outcome semantics (matches core.intentions _CLOSURE_TERMINAL):
-  done     — Pascal did it / it happened ("做了" "约了" "去了" "搞定")
-  recorded — Pascal did NOT do it but it's noted ("没做" "没去" "改天" "下次")
+  done     —the owner did it / it happened ("做了" "约了" "去了" "搞定")
+  recorded —the owner did NOT do it but it's noted ("没做" "没去" "改天" "下次")
   na       — stop chasing this ("不用了" "算了" "取消" "别追了")
   None     — ambiguous; defer to the LLM hint path (don't guess)
 """

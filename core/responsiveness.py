@@ -2,7 +2,7 @@
 
 The investigation on 2026-06-15 (real-log latency breakdown) found the wait
 after a user message is the MODEL, not the pipeline: Event→claude spawn is
-p50 1s, but claude(opus) generation is p50 103s / p90 414s (8/10 >60s). Pascal
+p50 1s, but claude(opus) generation is p50 103s / p90 414s (8/10 >60s). the owner
 chose to keep opus (quality) and instead make the WAIT feel alive. This module
 is the single, TESTED source of truth for that feedback policy — bot.sh's
 activity-stream subshell mirrors/consumes it (the bash equivalent was
@@ -31,6 +31,8 @@ POLL_FIRST_S = 10
 POLL_STEADY_S = 10
 ACK_AFTER_S = 20
 PROMOTE_AFTER_S = 90
+PROMOTE_IDLE_AFTER_S = 60
+PROMOTE_HARD_AFTER_S = 600
 PROGRESS_ACK = "我还在处理，查清楚后马上告诉你。"
 
 
@@ -42,6 +44,15 @@ def poll_interval(poll_index: int) -> int:
 def decide_action(elapsed_s: int, ack_sent: bool = False) -> str:
     """Return one user-visible action for an in-flight reply."""
     return "ack" if elapsed_s >= ACK_AFTER_S and not ack_sent else "none"
+
+
+def should_promote(elapsed_s: int, idle_s: int) -> bool:
+    """Promote only a stalled call, with a hard cap for user availability."""
+    elapsed = max(0, int(elapsed_s))
+    idle = max(0, int(idle_s))
+    return elapsed >= PROMOTE_HARD_AFTER_S or (
+        elapsed >= PROMOTE_AFTER_S and idle >= PROMOTE_IDLE_AFTER_S
+    )
 
 
 def _as_bool(s: str) -> bool:
@@ -56,6 +67,8 @@ def main(argv: list[str]) -> int:
         print(f"JV_POLL_STEADY={POLL_STEADY_S}")
         print(f"JV_ACK_AFTER={ACK_AFTER_S}")
         print(f"JV_PROMOTE_AFTER={PROMOTE_AFTER_S}")
+        print(f"JV_PROMOTE_IDLE_AFTER={PROMOTE_IDLE_AFTER_S}")
+        print(f"JV_PROMOTE_HARD_AFTER={PROMOTE_HARD_AFTER_S}")
         print(f"JV_PROGRESS_ACK='{PROGRESS_ACK}'")
         return 0
     if cmd == "decide":
@@ -67,7 +80,12 @@ def main(argv: list[str]) -> int:
         idx = int(argv[1]) if len(argv) > 1 and argv[1].lstrip("-").isdigit() else 0
         print(poll_interval(idx))
         return 0
-    print(f"unknown command: {cmd} (env|decide|poll)", file=sys.stderr)
+    if cmd == "promote":
+        elapsed = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 0
+        idle = int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 0
+        print("promote" if should_promote(elapsed, idle) else "none")
+        return 0
+    print(f"unknown command: {cmd} (env|decide|poll|promote)", file=sys.stderr)
     return 2
 
 

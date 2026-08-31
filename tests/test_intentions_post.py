@@ -81,6 +81,27 @@ def test_apply_action_keeps_real_message(monkeypatch):
     assert msgs == ["14:00 开会，记得带电脑"]
 
 
+@pytest.mark.parametrize("response", [
+    "昨天主线：修复投递，今天继续检查",
+    "昨日主线: 完成白皮书，今天处理审校",
+])
+def test_morning_digest_is_owned_by_anchor_not_intention_card(
+    monkeypatch, response,
+):
+    executed = []
+    monkeypatch.setattr(
+        ip, "mark_executed", lambda intent_id, **_k: executed.append(intent_id),
+    )
+    msgs = []
+
+    ip._apply_action(
+        "int_daily", response=response, action="notify", user_messages=msgs,
+    )
+
+    assert executed == ["int_daily"]
+    assert msgs == []
+
+
 def test_apply_action_records_closure_and_does_not_card(monkeypatch):
     """A follow-up with a closure sub-object records onto the parent and never
     surfaces a card — even with action=notify (recording is internal)."""

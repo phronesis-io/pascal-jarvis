@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -17,7 +20,28 @@ class ReleaseGateError(RuntimeError):
     """The revision has not met production release evidence requirements."""
 
 
+class ReleaseGateUnavailable(ReleaseGateError):
+    """Live remote evidence could not be read because the network is down."""
+
+
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+DEFAULT_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+CACHE_SCHEMA = "jarvis.release-gate-cache.v1"
+_NETWORK_FAILURE_MARKERS = (
+    "could not resolve host",
+    "failed to connect",
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "operation timed out",
+    "i/o timeout",
+    "tls handshake timeout",
+    "temporary failure in name resolution",
+    "no such host",
+    "context deadline exceeded",
+)
 
 
 def _repo_name(remote: str) -> str:
@@ -74,9 +98,32 @@ class ReleaseGate:
         root: str | Path | None = None,
         *,
         runner: Runner = subprocess.run,
+        cache_path: str | Path | None = None,
+        cache_max_age_seconds: int = DEFAULT_CACHE_MAX_AGE_SECONDS,
+        now: Callable[[], float] = time.time,
     ):
         self.root = Path(root or Path(__file__).resolve().parent.parent).resolve()
         self.runner = runner
+        self.cache_path = Path(cache_path).expanduser() if cache_path else None
+        self.cache_max_age_seconds = max(1, int(cache_max_age_seconds))
+        self.now = now
+
+    @staticmethod
+    def _remote_command(command: list[str]) -> bool:
+        return bool(
+            command
+            and (
+                command[0] == "gh"
+                or command[:2] == ["git", "fetch"]
+            )
+        )
+
+    @classmethod
+    def _network_failure(cls, command: list[str], detail: str) -> bool:
+        text = str(detail or "").lower()
+        return cls._remote_command(command) and any(
+            marker in text for marker in _NETWORK_FAILURE_MARKERS
+        )
 
     def _run(
         self, command: list[str], *, json_output: bool = False, timeout: int = 30
@@ -89,10 +136,20 @@ class ReleaseGate:
                 text=True,
                 timeout=timeout,
             )
+        except subprocess.TimeoutExpired as exc:
+            if self._remote_command(command):
+                raise ReleaseGateUnavailable(
+                    "live release evidence is temporarily unavailable"
+                ) from exc
+            raise ReleaseGateError(f"{command[0]} timed out") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise ReleaseGateError(f"{command[0]} failed: {exc}") from exc
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "command failed").strip()
+            if self._network_failure(command, detail):
+                raise ReleaseGateUnavailable(
+                    "live release evidence is temporarily unavailable"
+                )
             raise ReleaseGateError(detail[:500])
         if not json_output:
             return result.stdout.strip()
@@ -198,7 +255,7 @@ class ReleaseGate:
         cache[actor] = level == "admin" or role == "admin"
         return cache[actor]
 
-    def verify(self, *, fetch: bool = True) -> dict[str, Any]:
+    def _local_release_identity(self, *, fetch: bool) -> dict[str, str]:
         branch = self._run(["git", "branch", "--show-current"])
         if branch != "main":
             raise ReleaseGateError("production restart requires local main")
@@ -215,6 +272,12 @@ class ReleaseGate:
             raise ReleaseGateError("worktree changes are not deployable")
         remote = self._run(["git", "remote", "get-url", "origin"])
         repo = _repo_name(remote)
+        return {"repo": repo, "sha": sha}
+
+    def verify(self, *, fetch: bool = True) -> dict[str, Any]:
+        identity = self._local_release_identity(fetch=fetch)
+        repo = identity["repo"]
+        sha = identity["sha"]
 
         protection = self._run(
             ["gh", "api", f"repos/{repo}/branches/main/protection"],
@@ -447,13 +510,133 @@ class ReleaseGate:
             },
         }
 
+    def _write_cache(self, result: dict[str, Any], verified_epoch: float) -> bool:
+        if self.cache_path is None:
+            return False
+        path = self.cache_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            payload = {
+                "schema": CACHE_SCHEMA,
+                "verified_epoch": float(verified_epoch),
+                "result": result,
+            }
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+                os.chmod(path, 0o600)
+            finally:
+                try:
+                    Path(temporary).unlink()
+                except FileNotFoundError:
+                    pass
+            return True
+        except OSError:
+            return False
+
+    def _cached_result(self, identity: dict[str, str]) -> dict[str, Any]:
+        path = self.cache_path
+        if path is None or path.is_symlink():
+            raise ReleaseGateError("no trustworthy cached release evidence")
+        try:
+            stat = path.stat()
+            if hasattr(os, "getuid") and stat.st_uid != os.getuid():
+                raise ReleaseGateError("cached release evidence has another owner")
+            if stat.st_mode & 0o077:
+                raise ReleaseGateError("cached release evidence permissions are unsafe")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except ReleaseGateError:
+            raise
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ReleaseGateError("cached release evidence is unreadable") from exc
+        if not isinstance(payload, dict) or payload.get("schema") != CACHE_SCHEMA:
+            raise ReleaseGateError("cached release evidence schema is invalid")
+        result = payload.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise ReleaseGateError("cached release evidence did not pass")
+        if (
+            str(result.get("repo") or "") != identity["repo"]
+            or str(result.get("sha") or "") != identity["sha"]
+        ):
+            raise ReleaseGateError("cached release evidence is for another revision")
+        required_checks = result.get("required_checks")
+        branch = result.get("branch_protection")
+        if not isinstance(required_checks, list) or not required_checks:
+            raise ReleaseGateError("cached release evidence has no required checks")
+        if not isinstance(branch, dict):
+            raise ReleaseGateError("cached branch-protection evidence is invalid")
+        if not all(
+            branch.get(key) is expected
+            for key, expected in (
+                ("admin_bypass", False),
+                ("strict_checks", True),
+                ("pull_request_required", True),
+                ("conversation_resolution", True),
+            )
+        ):
+            raise ReleaseGateError("cached branch-protection evidence is incomplete")
+        approval_mode = str(result.get("approval_mode") or "")
+        if approval_mode == "independent_review":
+            approval_present = bool(result.get("review_evidence"))
+        elif approval_mode == "owner_release_decision":
+            approval_present = bool(result.get("owner_release_decisions"))
+        else:
+            approval_present = False
+        if not approval_present:
+            raise ReleaseGateError("cached release approval evidence is incomplete")
+        try:
+            verified_epoch = float(payload["verified_epoch"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReleaseGateError("cached release evidence has no timestamp") from exc
+        age = float(self.now()) - verified_epoch
+        if age < 0 or age > self.cache_max_age_seconds:
+            raise ReleaseGateError("cached release evidence is stale")
+        return {
+            **result,
+            "evidence_source": "cached_live_verification",
+            "stale": True,
+            "live_verified_epoch": verified_epoch,
+            "cache_age_seconds": round(age, 3),
+        }
+
+    def verify_resilient(self, *, fetch: bool = True) -> dict[str, Any]:
+        """Use a fresh exact-SHA live receipt only for transient network loss."""
+        try:
+            result = self.verify(fetch=fetch)
+        except ReleaseGateUnavailable:
+            identity = self._local_release_identity(fetch=False)
+            return self._cached_result(identity)
+        verified_epoch = float(self.now())
+        live = {
+            **result,
+            "evidence_source": "github_live",
+            "stale": False,
+            "live_verified_epoch": verified_epoch,
+        }
+        live["cache_persisted"] = self._write_cache(live, verified_epoch)
+        return live
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Jarvis production release gate")
     parser.add_argument("--no-fetch", action="store_true")
     args = parser.parse_args(argv)
     try:
-        result = ReleaseGate().verify(fetch=not args.no_fetch)
+        cache_path = os.environ.get(
+            "JARVIS_RELEASE_GATE_CACHE",
+            str(Path.home() / ".jarvis" / "release-gate-cache.json"),
+        )
+        result = ReleaseGate(cache_path=cache_path).verify_resilient(
+            fetch=not args.no_fetch
+        )
     except ReleaseGateError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 1

@@ -629,6 +629,59 @@ MIGRATIONS = [
             route_id, limit_id, window_name, resets_at_epoch, observed_epoch DESC
         );
     """,
+    # v16: Provider-neutral model execution receipts. Prompts and credentials
+    # are deliberately absent; attribution and terminal evidence survive the
+    # caller process without turning model prose into product truth.
+    """
+    CREATE TABLE IF NOT EXISTS model_runtime_calls (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        matter_id TEXT NOT NULL DEFAULT '',
+        context TEXT NOT NULL,
+        effect_authority TEXT NOT NULL,
+        prompt_digest TEXT NOT NULL,
+        status TEXT NOT NULL,
+        selected_route TEXT NOT NULL DEFAULT '',
+        requested_model TEXT NOT NULL DEFAULT '',
+        observed_model TEXT NOT NULL DEFAULT '',
+        terminal_reason TEXT NOT NULL DEFAULT '',
+        cost_usd REAL,
+        executor_pid INTEGER NOT NULL DEFAULT 0,
+        started_epoch REAL NOT NULL,
+        finished_epoch REAL,
+        duration_ms INTEGER,
+        attempt_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS model_runtime_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id TEXT NOT NULL REFERENCES model_runtime_calls(id)
+            ON DELETE CASCADE,
+        attempt INTEGER NOT NULL,
+        route_id TEXT NOT NULL,
+        upstream TEXT NOT NULL,
+        adapter TEXT NOT NULL,
+        requested_model TEXT NOT NULL,
+        observed_model TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        effects_started INTEGER,
+        cost_usd REAL,
+        started_epoch REAL NOT NULL,
+        finished_epoch REAL NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        UNIQUE(call_id, attempt)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_task
+        ON model_runtime_calls(task_id, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_matter
+        ON model_runtime_calls(matter_id, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_status
+        ON model_runtime_calls(status, started_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_runtime_attempt_call
+        ON model_runtime_attempts(call_id, attempt);
+    """,
 ]
 
 _connection: sqlite3.Connection | None = None
@@ -652,6 +705,27 @@ def get_db() -> sqlite3.Connection:
         _connection.execute("PRAGMA busy_timeout=5000")
         _run_migrations(_connection)
     return _connection
+
+
+@contextmanager
+def independent_connection():
+    """Open a short-lived connection for work performed by another thread.
+
+    The process singleton is convenient for ordinary serial call paths but
+    cannot safely share a transaction with a lease-renewal thread. Ensure the
+    schema through the primary connection, then give the caller its own WAL
+    connection and transaction state.
+    """
+    get_db()
+    connection = sqlite3.connect(str(_db_path()), check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=5000")
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 @contextmanager
@@ -700,7 +774,7 @@ def _run_migrations(db: sqlite3.Connection):
         ),
     )
     # Frontstage acceptance v2 records whether a feedback prompt has already
-    # been shown and preserves Pascal's exact confirmation words.  Named
+    # been shown and preserves the owner's exact confirmation words.  Named
     # additive migrations keep an interrupted upgrade re-entrant on the live
     # SQLite database.
     ensure_additive_columns(
@@ -717,6 +791,22 @@ def _run_migrations(db: sqlite3.Connection):
         namespace="frontstage_acceptance_v2",
         table="frontstage_acceptance",
         columns=(("owner_confirmation", "TEXT NOT NULL DEFAULT ''"),),
+    )
+    # The model-runtime foundation was exercised against disposable databases
+    # before its first release. Keep those pre-release v16 databases compatible
+    # with the final receipt shape instead of assuming migration history alone
+    # proves the physical column exists.
+    ensure_additive_columns(
+        db,
+        namespace="model_runtime_executor_v1",
+        table="model_runtime_calls",
+        columns=(("executor_pid", "INTEGER NOT NULL DEFAULT 0"),),
+    )
+    ensure_additive_columns(
+        db,
+        namespace="memory_compiler_retry_v1",
+        table="memory_compile_batches",
+        columns=(("attempts", "INTEGER NOT NULL DEFAULT 0"),),
     )
     try:
         db.execute("BEGIN IMMEDIATE")

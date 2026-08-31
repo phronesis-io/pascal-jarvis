@@ -23,7 +23,7 @@ import _ef_delivery as efd
 def _source_url(data: dict, msg: str) -> str:
     """The public link to put behind '阅读原文'.
 
-    NEVER a richview/localhost URL — Pascal reads Feishu on his phone, where
+    NEVER a richview/localhost URL —the owner reads Feishu on his phone, where
     127.0.0.1 is unreachable. Prefer a structured source_url; otherwise pull the
     first real link out of the message (markdown target, then bare URL).
     """
@@ -157,7 +157,7 @@ def _surface_allowed(urgent: bool, now: float | None = None) -> bool:
     if urgent:
         return True
     now = time.time() if now is None else now
-    # Do not mint a non-urgent card while Pascal is asleep. The poller runs
+    # Do not mint a non-urgent card while the owner is asleep. The poller runs
     # all night; cards created at 00:20/02:20/04:20 only sit in the quiet-hours
     # queue and then land as three back-to-back notices at 09:30, spending a
     # third of the global daily budget before the day starts (8/20-8/22 prod
@@ -298,7 +298,7 @@ def main() -> int:
 
     # Output user message as a Lark card. Render the FULL message inline (no
     # truncation) and link "阅读原文" to the public source — not a localhost
-    # richview page, which is dead on Pascal's phone. build_card auto-linkifies
+    # richview page, which is dead on the owner's phone. build_card auto-linkifies
     # any bare URL in the body so it's tappable on mobile too.
     surface_items = []
     for item in data.get("user_messages", []) or []:

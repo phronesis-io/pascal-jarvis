@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Calendar write-back helper — create, update, or delete Lark calendar events.
-# Used by the main conversation Claude when Pascal confirms a schedule change.
+# Used by the main conversation Claude when the owner confirms a schedule change.
 #
 # Usage:
 #   calendar_write.sh create --summary "会议" --start "2026-05-14T10:00:00+08:00" --end "2026-05-14T11:00:00+08:00"

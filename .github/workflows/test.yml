@@ -18,8 +18,14 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          # Keep the protected `test` check name while matching production.
+          python-version: "3.14"
           cache: pip
+
+      - name: Match production timezone
+        run: |
+          sudo ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+          echo Asia/Shanghai | sudo tee /etc/timezone
 
       - name: Install dependencies
         # requirements.txt (not a hand-picked subset) — a missing runtime dep
@@ -54,3 +60,26 @@ jobs:
           python -m coverage combine
           python -m coverage json -o /tmp/jarvis-coverage.json
           python scripts/coverage_budget.py /tmp/jarvis-coverage.json
+
+  python-312-compat:
+    name: Python 3.12 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Match production timezone
+        run: |
+          sudo ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+          echo Asia/Shanghai | sudo tee /etc/timezone
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run compatibility tests
+        run: python -m pytest tests/

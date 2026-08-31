@@ -8,7 +8,7 @@
 #  1. StandardOut/ErrorPath must NOT point under ~/Desktop (launchd has no
 #     Desktop TCC permission → exit 78, zero logs). Use /tmp/jarvis-*.log.
 #  2. Interpreter must be the exact Python validated by setup/doctor. On
-#     Pascal's Mac that is Homebrew Python because it carries the Desktop TCC
+#     the owner's Mac that is Homebrew Python because it carries the Desktop TCC
 #     grant; portable installs may use another absolute path or the managed
 #     ~/.jarvis/runtime-venv.
 #  3. bash scripts cannot be ProgramArguments directly (no Desktop TCC) —

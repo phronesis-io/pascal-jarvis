@@ -6,6 +6,7 @@ import json
 import subprocess
 import time
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from core.card import strip_internal_fields
 from core.lark_bot_transport import send_from_cli_args
@@ -112,3 +113,79 @@ def send(
             message_id = ""
         return str(message_id) or "sent"
     return ""
+
+
+def sync_card(
+    memorial_id: str,
+    card: dict,
+    *,
+    root: str | Path,
+    runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    cli_runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    ops_log: Callable[..., None] = _ops_log,
+) -> None:
+    """Update every delivered copy, preferring keychain-independent bot auth."""
+    try:
+        from core.memorial_thread import sent_message_ids
+
+        message_ids = sent_message_ids(memorial_id)
+    except Exception as exc:
+        ops_log(
+            "thread_receipt_lookup_failed",
+            level="warn",
+            memorial_id=memorial_id,
+            error_type=type(exc).__name__,
+        )
+        return
+    if not message_ids:
+        return
+    data = json.dumps(
+        {"content": json.dumps(card, ensure_ascii=False)}, ensure_ascii=False
+    )
+    for message_id in message_ids:
+        if runner is None:
+            from core.lark_bot_transport import update_card
+
+            direct = update_card(
+                message_id,
+                json.dumps(card, ensure_ascii=False),
+                root=root,
+            )
+            if direct.attempted:
+                if not direct.ok:
+                    ops_log(
+                        "lark_card_sync_rejected",
+                        level="warn",
+                        memorial_id=memorial_id,
+                        message_id=message_id,
+                        error=direct.error,
+                    )
+                continue
+        active_runner = runner or cli_runner
+        try:
+            result = active_runner(
+                [
+                    "lark-cli", "api", "PATCH",
+                    f"/open-apis/im/v1/messages/{message_id}",
+                    "--data", data, "--as", "bot",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=12,
+            )
+            if result.returncode != 0:
+                ops_log(
+                    "lark_card_sync_rejected",
+                    level="warn",
+                    memorial_id=memorial_id,
+                    message_id=message_id,
+                    returncode=int(result.returncode),
+                )
+        except Exception as exc:
+            ops_log(
+                "lark_card_sync_failed",
+                level="warn",
+                memorial_id=memorial_id,
+                message_id=message_id,
+                error_type=type(exc).__name__,
+            )

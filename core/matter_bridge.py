@@ -27,6 +27,28 @@ def _now() -> str:
     return now_local_str("%Y-%m-%dT%H:%M:%S")
 
 
+def _closure_blocker_reply(blockers: list[dict], *, prefix: str) -> str:
+    """Translate internal closure blockers into bounded owner-facing copy."""
+    labels: list[str] = []
+    wording = {
+        "run": "还有一个执行窗口没收尾",
+        "job": "还有一个后台任务没结束",
+        "delegation": "还有一项外部操作待核验",
+        "intent": "还有一个提醒需要收口",
+        "memorial": "还有一张相关卡片需要收口",
+    }
+    for blocker in blockers[:4]:
+        label = wording.get(
+            str(blocker.get("entity_type") or ""),
+            "还有一项关联工作未完成",
+        )
+        if label not in labels:
+            labels.append(label)
+    if not labels:
+        labels.append("还有一项关联工作未完成")
+    return f"{prefix}：{'；'.join(labels)}。Jarvis 会继续收口，不需要你排查内部编号。"
+
+
 def bind_conversation(conv_key: str, matter_id: str, channel: str = "lark",
                       destination_id: str = "", chat_type: str = "p2p",
                       thread_root_id: str = "", actor: str = "user") -> dict:
@@ -339,6 +361,10 @@ def record_channel_message(matter_id: str, channel: str, message_id: str,
 
 def _match_command(content: str) -> tuple[str, str, str] | None:
     text = str(content or "").strip()
+    if re.sub(r"\s+", "", text).lower() in {
+        "去codex", "在codex继续", "交给codex", "用codex继续",
+    }:
+        return "handoff", "codex", "matter"
     match = re.match(r"^/(session|会话)(?:\s+(.+))?$", text, re.I)
     if match:
         rest = (match.group(2) or "current").strip()
@@ -452,7 +478,7 @@ def _close_bound_matter(conv_key: str, matter_id: str, outcome: str,
     from core.matter_closure import close_matter
     closed = close_matter(
         matter_id,
-        outcome=outcome or "已由 Pascal 确认完成",
+        outcome=outcome or "已由用户确认完成",
         confirmation_text=confirmation_text,
         source="lark",
     )
@@ -510,7 +536,7 @@ def _model_preference_command(content: str) -> str | None:
     }:
         return "codex"
     # Provider switching must not depend on the provider that just failed.
-    # Pascal naturally says variants such as “上一下备用吧”; handle that at
+    #the owner naturally says variants such as “上一下备用吧”; handle that at
     # the deterministic command boundary and route to the local Codex rung.
     if re.fullmatch(
         r"(?:上|用|切到|切换到|换到)(?:一下)?(?:备用|备用通道)(?:吧|试试)?[。！!]?$",
@@ -545,7 +571,8 @@ def _is_model_usage_command(content: str) -> bool:
 
 
 def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
-                        chat_type: str = "p2p", actor: str = "user") -> dict:
+                        chat_type: str = "p2p", actor: str = "user",
+                        message_id: str = "") -> dict:
     preference_command = _model_preference_command(content)
     if preference_command:
         if chat_type != "p2p":
@@ -731,11 +758,9 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
             titles = "、".join(item["title"] for item in exc.open_items[:4])
             return {"handled": True, "reply": f"还不能结束：{titles}。请先闭环这些内容。"}
         except MatterClosureBlocked as exc:
-            titles = "、".join(
-                str(item.get("title") or item.get("entity_id") or "未完成工作")
-                for item in exc.blockers[:4]
-            )
-            return {"handled": True, "reply": f"还不能结束：{titles} 仍在执行或等待验证。"}
+            return {"handled": True, "reply": _closure_blocker_reply(
+                exc.blockers, prefix="还不能结束"
+            )}
         from core.conversation_context import logical_context_key
         return {"handled": True, "reply": f"会话「{matter['title']}」已结束，结果已归档。",
                 "transition": {"context_key": logical_context_key(conv_key)}}
@@ -748,22 +773,41 @@ def handle_lark_command(content: str, conv_key: str, destination_id: str = "",
             titles = "、".join(item["title"] for item in exc.open_items[:4])
             return {"handled": True, "reply": f"还不能直接完成：{titles}。"}
         except MatterClosureBlocked as exc:
-            titles = "、".join(
-                str(item.get("title") or item.get("entity_id") or "未完成工作")
-                for item in exc.blockers[:4]
-            )
-            return {"handled": True, "reply": f"还不能直接完成：{titles} 仍在执行或等待验证。"}
+            return {"handled": True, "reply": _closure_blocker_reply(
+                exc.blockers, prefix="还不能直接完成"
+            )}
         from core.conversation_context import logical_context_key
         return {"handled": True, "reply": f"事项「{matter['title']}」已完成并归档。",
                 "transition": {"context_key": logical_context_key(conv_key)}}
     if command == "handoff":
         provider = arg.lower() if arg.lower() in {"claude", "codex"} else "codex"
+        if provider == "codex":
+            from core.codex_wake import prepare_codex_wake
+            wake = prepare_codex_wake(
+                matter["id"],
+                source="lark",
+                source_ref=message_id,
+                actor=actor,
+            )
+            if wake["status"] in {"prepared", "reused"}:
+                verb = "已创建" if wake["status"] == "prepared" else "已找到"
+                return {"handled": True, "reply": (
+                    f"{verb} Codex 任务「{wake['task_name']}」。没有替你开工，"
+                    "也没有占用事项锁。\n"
+                    "打开 Codex 的任务列表，进入这个任务后直接说“继续”即可。\n\n"
+                    "如果手机端暂时没出现，请在新任务里说：\n"
+                    f"{wake['continuation_prompt']}"
+                )}
+            return {"handled": True, "reply": (
+                "这次没有确认 Codex 任务创建成功，所以没有假装已经打开。\n"
+                "请在 Codex 新任务里说：\n"
+                f"{wake['continuation_prompt']}"
+            )}
         from core.matter_executor import prepare_handoff
-        prepare_handoff(matter["id"], provider, actor="lark")
-        from core.codex_frontstage import continuation_prompt
+        handoff = prepare_handoff(matter["id"], provider, actor="lark")
         return {"handled": True, "reply": (
-            "上下文已经整理好。请在 Codex 新任务里说：\n"
-            f"{continuation_prompt(matter)}"
+            "上下文已经整理好。请在电脑的仓库终端运行：\n"
+            f"{handoff['command']}"
         )}
     return {"handled": True, "reply": "支持：new / use / current / list / done / handoff / clear"}
 
@@ -796,7 +840,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             result = handle_lark_command(
-                args.content, args.conv_key, args.destination_id, args.chat_type)
+                args.content, args.conv_key, args.destination_id, args.chat_type,
+                message_id=args.message_id,
+            )
         except Exception as exc:
             # Deterministic commands must never fall through into an LLM after
             # an infrastructure failure: that can duplicate a partially

@@ -63,9 +63,7 @@ def format_message(event_json: str) -> str:
         content = message.get("content", "")
         if content:
             parts.append(f"💬 **{sender}**: {content}")
-    if parts:
-        return "\n".join(parts) + "\n\n📡 Powered by EigenFlux"
-    return ""
+    return "\n".join(parts)
 
 
 def extract_metadata(event_json: str) -> dict:
@@ -232,7 +230,7 @@ def format_relation_event(event_json) -> str:
         return ""
 
     if event.get("type") == "friend_accepted" or data.get("friend_uid"):
-        return "✅ EigenFlux 好友申请已通过，你们现在是好友了。\n\n📡 Powered by EigenFlux"
+        return "✅ EigenFlux 好友申请已通过，你们现在是好友了。"
 
     reqs = data.get("friend_requests") or []
     lines = []
@@ -248,7 +246,7 @@ def format_relation_event(event_json) -> str:
     if not lines:
         return ""
     body = "\n\n".join(lines)
-    return f"📡 EigenFlux · 好友申请\n\n{body}\n\n跟我说「通过」就帮你接受。\n\n📡 Powered by EigenFlux"
+    return f"📡 EigenFlux · 好友申请\n\n{body}\n\n跟我说「通过」就帮你接受。"
 
 
 def extract_relation_ids(event_json) -> list[str]:

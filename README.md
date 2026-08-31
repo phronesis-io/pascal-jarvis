@@ -8,6 +8,11 @@ without rebuilding another chat product. Git/GitHub remains the source, diff,
 PR, CI, and merge evidence plane; Jarvis links only the bounded evidence a
 durable Matter needs.
 
+**日常怎么用：** 默认在电脑或手机 Codex 开一个干净任务；Git/GitHub 管代码证据；
+Jarvis 只在工作需要跨任务连续、正确时机、外部变化、异步结果或本人授权时介入；
+飞书只负责有界唤醒和原生协作。见
+[Codex 与 Jarvis 日常使用指南](docs/jarvis_codex_daily_use.md)。
+
 **Release: `v1.15.0` (2026-08-20)** — see [CHANGELOG.md](CHANGELOG.md). 3000+ tests passing.
 
 **Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -146,7 +151,7 @@ task does not own:
 4. **Built-in Plugins & Content Curation** — Two first-class integrations plus content-aware features:
    - **[Lark (Feishu)](plugins/lark/README.md)** — bidirectional IM bridge so you can chat with your agent from your phone.
    - **[EigenFlux](plugins/eigenflux/README.md)** — broadcast network with feed triage, verified friend actions, private messaging, and a real-time stream.
-   - *Content recommend* and *watch-later* — curates content for you; saved items remain queryable without creating nagging reminder intents.
+   - *Watch-later* — saves bounded owner-selected material for later retrieval without creating nagging reminder intents. The former standalone content-recommendation heartbeat is retired.
 
    Both plugins are optional — disable either by leaving its config section out of `jarvis.yaml`. See the [Plugins](#plugins) section below for usage.
 
@@ -183,6 +188,9 @@ repeat and Agent inference never counts.
 Delivery uses sanitization, deduplication, attention caps, retry,
 dead-letter, and delivered/read/acted confirmation. The `:3458` gateway and
 Tailscale paths remain retired. See [the Codex-frontstage PRD](docs/plans/2026-08-27-codex-frontstage-jarvis-backstage.md), [the unified delivery PRD](docs/prd_unified_delivery_items.md), and [the historical Matter/mobile PRD](docs/prd_matter_workspace_mobile.md).
+The generated [capability inventory](docs/capability_inventory.md) records the
+engineering evidence and explicit product disposition for every supported
+surface; `capability_product_policy.yaml` is the fail-closed product policy.
 
 ### Provider-neutral Matter execution
 
@@ -401,13 +409,20 @@ The post-script receives **Claude's response on stdin** and can act on it:
 
 ### The `HEARTBEAT_OK` signal
 
-`HEARTBEAT_OK` is the universal "nothing to do" response. When Claude determines there's no actionable output for a task, it returns this string. Post-scripts should check for it and exit cleanly:
+`HEARTBEAT_OK` is the universal "nothing to do" response. When a model determines there's no actionable output for a task, it returns this string. Post-scripts must use the shared fail-silent guard rather than exact matching:
 
 ```python
+from core.safety import is_idle_reply
+
 response = sys.stdin.read().strip()
-if response == "HEARTBEAT_OK":
+if is_idle_reply(response):
     sys.exit(0)
 ```
+
+For a structured protocol that permits arbitrary quoted source text, parse and
+validate the expected envelope first, then call `is_idle_reply` only when no
+envelope was found. This keeps internal tokens quoted in evidence from dropping
+a valid result while arbitrary JSON still cannot bypass the user-facing guard.
 
 ### Example patterns
 
@@ -661,11 +676,12 @@ code archive is git history.
 - Configure `openai.api_key` or `OPENAI_API_KEY` for the final API fallback.
   Main-chat fallback can use the bounded `bash`, `file_read`, and `file_write`
   loop in `core.openai_fallback`; pass `--no-tools` for text-only operation.
-  Owner background jobs retain the tool loop. Group conversations, heartbeat,
+  Owner background jobs retain the tool loop. Group/untrusted conversations,
   EigenFlux analysis, progress narration, and session compaction use text-only
-  paths by design. Auxiliary paths retain their own Claude/relay/API order
-  through `core.aux_model`; only the owner's live Lark conversation uses the
-  local Codex CLI rung.
+  paths by design. Heartbeat capabilities follow each stored task policy and
+  execute through `core.heartbeat_model` plus the shared `core.model_runtime`;
+  auxiliary paths use the same runtime through `core.aux_model`. Only the
+  owner's live Lark conversation uses the local Codex CLI rung.
 - Ask `/usage` (or naturally ask about package allowance) in the owner Lark
   chat, or use the Codex `jarvis_model_status` tool. Codex reports available
   account windows and reset times exactly. Claude-compatible relays and API

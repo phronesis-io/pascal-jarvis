@@ -13,8 +13,11 @@
 # Every run (idempotent, designed to finish in <60s — the heartbeat hard cap):
 #   1. Freshen the two source repos (bounded git fetch+ff; repos-sync owns the
 #      full pull, this is only a top-up — failure is tolerated).
-#   2. SKILL SYNC: mirror eigenflux/skills (main) -> plugins/eigenflux/skills
-#      (jarvis-owned real files), add+update, then apply reviewed local overlays.
+#   2. SKILL SYNC: compare eigenflux/skills (main) with the reviewed files in
+#      plugins/eigenflux/skills. The heartbeat is detect-only: it reports a
+#      candidate sync but never changes deployed source. A maintainer may set
+#      EIGENFLUX_PREINSTALL_APPLY=1 in an isolated worktree to apply the plan,
+#      then must ship it through tests, PR, Owner release and governed deploy.
 #      Preserves jarvis-local skills (frontmatter `jarvis-local: true`, e.g.
 #      ef-localdev). Upstream-removed paths are retired only when ownership is
 #      proven by the previously verified upstream SHA; unknown local additions
@@ -62,12 +65,41 @@ UPGRADE_RESULT="$JARVIS_DIR/eigenflux/.cli_upgrade_result"
 LOG_FILE="${LOG_FILE:-/dev/null}"
 CDN_URL="${EIGENFLUX_CDN_URL:-https://cdn.eigenflux.ai}"
 
+case "${EIGENFLUX_PREINSTALL_APPLY:-0}" in
+  1|true|TRUE|yes|YES) APPLY_SKILL_SYNC=true ;;
+  0|false|FALSE|no|NO|"") APPLY_SKILL_SYNC=false ;;
+  *)
+    echo "  FATAL: EIGENFLUX_PREINSTALL_APPLY must be true/false or 1/0"
+    echo ""
+    echo "PREINSTALL_FAIL"
+    exit 0
+    ;;
+esac
+
+if [ "$APPLY_SKILL_SYNC" = true ]; then
+  apply_branch="$(git -C "$JARVIS_DIR" branch --show-current 2>/dev/null || echo "")"
+  live_bot_pid="$(cat "$JARVIS_DIR/.bot.pid" 2>/dev/null || echo "")"
+  if [ -z "$apply_branch" ] || [ "$apply_branch" = main ] || [ "$apply_branch" = master ]; then
+    echo "  FATAL: Skill apply requires a named non-main maintenance worktree"
+    echo ""
+    echo "PREINSTALL_FAIL"
+    exit 0
+  fi
+  if [ -n "$live_bot_pid" ] && kill -0 "$live_bot_pid" 2>/dev/null; then
+    echo "  FATAL: Skill apply refused while this checkout owns a live Jarvis bot"
+    echo ""
+    echo "PREINSTALL_FAIL"
+    exit 0
+  fi
+fi
+
 # Maintainer-machine gate (2026-07-13 fresh-install audit): parity tracking
 # only makes sense where the upstream EigenFlux clones live next to this repo.
 # On any other install, empty output = heartbeat skips (no Claude call, no
 # "NEVER run" watermark noise).
 if ! command -v eigenflux >/dev/null 2>&1 \
-    || [ ! -d "$MAIN_DIR/.git" ] || [ ! -d "$PLUGIN_DIR/.git" ]; then
+    || ! git -C "$MAIN_DIR" rev-parse --git-dir >/dev/null 2>&1 \
+    || ! git -C "$PLUGIN_DIR" rev-parse --git-dir >/dev/null 2>&1; then
   exit 0
 fi
 
@@ -116,16 +148,18 @@ mirror_one() {
     candidate="$rendered"
   fi
   if [ ! -f "$dst" ]; then
-    if mkdir -p "$(dirname "$dst")" && cp -p "$candidate" "$dst"; then
-      added+=("$rel")
-    else
-      fail+=("skill copy failed: $rel")
+    added+=("$rel")
+    if [ "$APPLY_SKILL_SYNC" = true ]; then
+      if ! mkdir -p "$(dirname "$dst")" || ! cp -p "$candidate" "$dst"; then
+        fail+=("skill copy failed: $rel")
+      fi
     fi
   elif ! cmp -s "$candidate" "$dst"; then
-    if cp -p "$candidate" "$dst"; then
-      updated+=("$rel")
-    else
-      fail+=("skill copy failed: $rel")
+    updated+=("$rel")
+    if [ "$APPLY_SKILL_SYNC" = true ]; then
+      if ! cp -p "$candidate" "$dst"; then
+        fail+=("skill copy failed: $rel")
+      fi
     fi
   fi
   [ -n "$rendered" ] && rm -f "$rendered"
@@ -142,7 +176,10 @@ fi
 
 # ── 1. Freshen source repos + capture current HEADs ───────────────────
 for repo in "$PLUGIN_DIR" "$MAIN_DIR"; do
-  [ -d "$repo/.git" ] || { notes+=("missing source repo: $(basename "$repo")"); continue; }
+  if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    notes+=("missing source repo: $(basename "$repo")")
+    continue
+  fi
   bounded 8 git -C "$repo" fetch --quiet --prune origin 2>>"$LOG_FILE" || \
     notes+=("fetch top-up skipped for $(basename "$repo") (repos-sync covers it)")
   bounded 8 git -C "$repo" merge --ff-only --quiet 2>>"$LOG_FILE" || true
@@ -173,9 +210,13 @@ fi
 # Propagate intentional upstream deletions through a separately testable,
 # provenance-gated retire step. Unknown local additions are left untouched.
 if [ -n "$main_stored" ]; then
+  retire_args=(
+    --upstream-repo "$MAIN_DIR" --previous-sha "$main_stored"
+    --source-skills "$SRC_SKILLS" --destination-skills "$DST_SKILLS"
+  )
+  if [ "$APPLY_SKILL_SYNC" = false ]; then retire_args+=(--dry-run); fi
   retire_output="$(python3 "$SCRIPT_DIR/eigenflux_preinstall_retire.py" \
-    --upstream-repo "$MAIN_DIR" --previous-sha "$main_stored" \
-    --source-skills "$SRC_SKILLS" --destination-skills "$DST_SKILLS" 2>>"$LOG_FILE")"
+    "${retire_args[@]}" 2>>"$LOG_FILE")"
   retire_rc=$?
   if [ "$retire_rc" -ne 0 ]; then
     fail+=("upstream skill retirement check failed")
@@ -197,7 +238,15 @@ for skill in "${managed[@]}"; do
   if [ -d "$DST_SKILLS/$skill" ]; then
     while IFS= read -r f; do
       rel="${f#"$DST_SKILLS"/}"
-      [ -f "$SRC_SKILLS/$rel" ] || orphan_files+=("$rel")
+      if [ ! -f "$SRC_SKILLS/$rel" ]; then
+        planned_removed=false
+        if [ ${#removed_files[@]} -gt 0 ]; then
+          for removed in "${removed_files[@]}"; do
+            [ "$removed" = "$rel" ] && planned_removed=true && break
+          done
+        fi
+        [ "$planned_removed" = true ] || orphan_files+=("$rel")
+      fi
     done < <(find "$DST_SKILLS/$skill" -type f | sort)
   fi
 done
@@ -205,6 +254,11 @@ done
 while IFS= read -r d; do
   name="$(basename "$d")"; is_managed=false
   for m in "${managed[@]}"; do [ "$m" = "$name" ] && is_managed=true && break; done
+  if [ ${#retired_skills[@]} -gt 0 ]; then
+    for retired in "${retired_skills[@]}"; do
+      [ "$retired" = "$name" ] && is_managed=true && break
+    done
+  fi
   if [ "$is_managed" = false ]; then
     if grep -qi "jarvis-local" "$d/SKILL.md" 2>/dev/null; then local_skills+=("$name")
     else orphan_skills+=("$name"); fi
@@ -215,6 +269,10 @@ if [ ${#added[@]} -gt 0 ]; then echo "  NEW skill files (${#added[@]}):"; printf
 if [ ${#updated[@]} -gt 0 ]; then echo "  UPDATED to match upstream (${#updated[@]}):"; printf '    ~ %s\n' "${updated[@]}"; fi
 if [ ${#removed_files[@]} -gt 0 ]; then echo "  REMOVED upstream files (${#removed_files[@]}):"; printf '    - %s\n' "${removed_files[@]}"; fi
 if [ ${#retired_skills[@]} -gt 0 ]; then echo "  RETIRED upstream skills (${#retired_skills[@]}):"; printf '    - %s\n' "${retired_skills[@]}"; fi
+skill_change_count=$(( ${#added[@]} + ${#updated[@]} + ${#removed_files[@]} + ${#retired_skills[@]} ))
+if [ "$APPLY_SKILL_SYNC" = false ] && [ "$skill_change_count" -gt 0 ]; then
+  notes+=("upstream Skill changes detected; deployed source left untouched — apply only in a governed worktree")
+fi
 [ ${#added[@]} -eq 0 ] && [ ${#updated[@]} -eq 0 ] \
   && [ ${#removed_files[@]} -eq 0 ] && [ ${#retired_skills[@]} -eq 0 ] \
   && echo "  skills: current with eigenflux(main) (${#managed[@]} skills mirrored)"
@@ -344,30 +402,41 @@ if [ -n "$cli_current" ]; then
     else echo "    • auth probe: inconclusive (rc=$rc)"; fi
   fi
 fi
-# 5e. Skill integrity — managed files equal upstream plus reviewed overlays.
+# 5e. Skill integrity — apply mode must leave managed files equal to upstream
+# plus reviewed overlays. Detect mode already rendered every overlay and
+# compared every path in mirror_one; pending differences are review work, not a
+# reason to mutate the deployed checkout or fail the observation cycle.
 integrity_bad=()
-for skill in "${managed[@]}"; do
-  while IFS= read -r f; do
-    rel="${f#"$SRC_SKILLS"/}"
-    expected="$f"; rendered=""
-    if [ -f "$SKILL_OVERLAYS/$rel" ]; then
-      rendered="$(mktemp /tmp/jarvis-ef-integrity.XXXXXX)"
-      if python3 "$JARVIS_DIR/core/eigenflux_skill_overlay.py" \
-          --base "$f" --overlay "$SKILL_OVERLAYS/$rel" \
-          --output "$rendered"; then
-        expected="$rendered"
-      else
-        integrity_bad+=("$rel")
-        rm -f "$rendered"
-        continue
+if [ "$APPLY_SKILL_SYNC" = false ]; then
+  if [ "$skill_change_count" -gt 0 ]; then
+    echo "    ✓ skill sync plan rendered (detect-only; deployed source unchanged)"
+  else
+    echo "    ✓ skill integrity (deployed files already match upstream + overlays)"
+  fi
+else
+  for skill in "${managed[@]}"; do
+    while IFS= read -r f; do
+      rel="${f#"$SRC_SKILLS"/}"
+      expected="$f"; rendered=""
+      if [ -f "$SKILL_OVERLAYS/$rel" ]; then
+        rendered="$(mktemp /tmp/jarvis-ef-integrity.XXXXXX)"
+        if python3 "$JARVIS_DIR/core/eigenflux_skill_overlay.py" \
+            --base "$f" --overlay "$SKILL_OVERLAYS/$rel" \
+            --output "$rendered"; then
+          expected="$rendered"
+        else
+          integrity_bad+=("$rel")
+          rm -f "$rendered"
+          continue
+        fi
       fi
-    fi
-    cmp -s "$expected" "$DST_SKILLS/$rel" || integrity_bad+=("$rel")
-    [ -n "$rendered" ] && rm -f "$rendered"
-  done < <(find "$SRC_SKILLS/$skill" -type f | sort)
-done
-if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (upstream + Jarvis overlays)"
-else echo "    ✗ skill integrity drift: ${integrity_bad[*]}"; fail+=("skill integrity: ${integrity_bad[*]}"); fi
+      cmp -s "$expected" "$DST_SKILLS/$rel" || integrity_bad+=("$rel")
+      [ -n "$rendered" ] && rm -f "$rendered"
+    done < <(find "$SRC_SKILLS/$skill" -type f | sort)
+  done
+  if [ ${#integrity_bad[@]} -eq 0 ]; then echo "    ✓ skill integrity (upstream + Jarvis overlays)"
+  else echo "    ✗ skill integrity drift: ${integrity_bad[*]}"; fail+=("skill integrity: ${integrity_bad[*]}"); fi
+fi
 # 5f. Live feed-shape check — only when authed (read-only, small sample).
 # Contract (ef-broadcast/references/feed.md): every item carries a STRING
 # item_id (the feedback API 400s on numeric ones — see 5f-ter); `url` is the
@@ -418,6 +487,8 @@ try: d=json.loads(raw[i:]) if i>=0 else {}
 except Exception: d={}
 sys.exit(0 if d.get('processed_count') is not None else 1)" 2>/dev/null; then
     echo "    ✓ feedback write round-trip (string item_id accepted, processed_count returned)"
+  elif echo "$fb_resp" | grep -Eqi 'EOF|timed? ?out|connection (reset|refused)|TLS|temporary|network|no such host'; then
+    echo "    • feedback write round-trip: inconclusive (transient network failure)"
   else
     echo "    ✗ feedback write REJECTED — $(echo "$fb_resp" | tr '\n' ' ' | cut -c1-160)"; fail+=("feedback write regression")
   fi
@@ -480,10 +551,16 @@ PY
 fi
 if [ ${#notes[@]} -gt 0 ]; then echo ""; echo "  notes:"; printf '    - %s\n' "${notes[@]}"; fi
 
-# Advance stored SHAs ONLY on green verification (so a regression keeps the
-# drift visible next run); always refresh cli_commands snapshot.
+# Advance stored SHAs only on green verification. In detect-only mode, keep the
+# authoritative main SHA pinned while a Skill change is pending so later cycles
+# cannot mistake an observed-but-unreleased contract for deployed behavior.
 adv_plugin="$plugin_stored"; adv_main="$main_stored"
-if [ "$verify_ok" = true ]; then adv_plugin="$plugin_head"; adv_main="$main_head"; fi
+if [ "$verify_ok" = true ]; then
+  adv_plugin="$plugin_head"
+  if [ "$APPLY_SKILL_SYNC" = true ] || [ "$skill_change_count" -eq 0 ]; then
+    adv_main="$main_head"
+  fi
+fi
 python3 - "$STATE_FILE" "$cli_current" "$cli_latest" "$adv_plugin" "$adv_main" "$cli_cmds" \
   "${#added[@]}" "${#updated[@]}" \
   "$(( ${#removed_files[@]} + ${#retired_skills[@]} ))" \

@@ -13,7 +13,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import brain_health
 from core.brain_health import (FAIL_WINDOWS_THRESHOLD, MIN_STARVED_FOR_SYSTEMIC,
-                               STARVATION_FACTOR, WEDGE_CONSEC_THRESHOLD, assess)
+                               STARVATION_FACTOR, WEDGE_CONSEC_THRESHOLD,
+                               WEDGE_MIN_SECONDS, assess)
 from core.textutil import task_display_name
 
 # Alert copy is boss-facing: since 2026-08-24 it carries the shared
@@ -254,7 +255,7 @@ def test_replayed_7_8_wedge_is_detected():
     assert "intention-check" not in r1["summary"]
 
 
-def test_wedge_consec_arm_fires_even_with_fresh_success():
+def test_wedge_consec_arm_requires_sustained_fresh_failure():
     # empty_pre cycles refresh last_success WITHOUT resetting
     # consecutive_failures — admin's "refreshed case". consec>=3 alone wedges.
     assert WEDGE_CONSEC_THRESHOLD == 3
@@ -262,9 +263,38 @@ def test_wedge_consec_arm_fires_even_with_fresh_success():
     state = {"intention-check": _ts(last_run=NOW - 60, last_success=NOW - 60,
                                     last_status="empty_pre",
                                     consecutive_failures=3)}
-    r = _assess(state, tasks)
-    assert r["brain_dead"] is True
-    assert any(INTENTION_CHECK in a for a in r["alerts"])
+    first = _assess(state, tasks)
+    assert first["brain_dead"] is False
+    assert first["samples"]["intention-check"]["wedge_since"] == NOW
+
+    persisted = first["samples"]
+    persisted["intention-check"]["wedge_since"] = NOW - WEDGE_MIN_SECONDS - 1
+    sustained = _assess(state, tasks, prev=persisted)
+    assert sustained["brain_dead"] is True
+    assert any(INTENTION_CHECK in a for a in sustained["alerts"])
+
+
+def test_wedge_candidate_clears_when_consecutive_failures_recover():
+    tasks = [_task("intention-check")]
+    prev = {"intention-check": {
+        "total_failures": 3,
+        "total_runs": 4,
+        "fail_windows": 0,
+        "wedge_since": NOW - WEDGE_MIN_SECONDS - 1,
+    }}
+    state = {"intention-check": _ts(
+        last_run=NOW - 60,
+        last_success=NOW - 60,
+        last_status="ok",
+        consecutive_failures=0,
+        total_failures=3,
+        total_runs=5,
+    )}
+
+    result = _assess(state, tasks, prev=prev)
+
+    assert result["brain_dead"] is False
+    assert result["samples"]["intention-check"]["wedge_since"] == 0
 
 
 def test_wedge_stale_failing_arm_fires_below_consec_threshold():

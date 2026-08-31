@@ -1,4 +1,4 @@
-"""Absence reporting — telling the owner when Jarvis was not there at all.
+"""Absence reporting — tellingthe owner when Jarvis was not there at all.
 
 2026-08-19 audit. The host slept for 39 of 39 hours and the guardian daemon
 detected it 38 separate times, correctly, to the second. Every one of those
@@ -232,11 +232,20 @@ def emit(root: Path | str, report: Report) -> bool:
     from core.memorial import create
 
     title, body = build_card(root, report)
+    expired, skipped = missed(root, report.start, report.end)
+    has_owner_cost = bool(expired or skipped)
     _memorial_id, accepted = create(
         source=SOURCE,
         title=title,
         body=body,
         attention="notice",
+        work_receipt="已确认主机恢复，并核对离线期间的过期事项和跳过例行",
+        owner_need="external_change" if has_owner_cost else "none",
+        why_now=("主机刚恢复，离线期间已有事项过期或例行跳过"
+                 if has_owner_cost else ""),
+        owner_action=("只需决定是否补做已过期事项" if has_owner_cost else ""),
+        silence_cost=("不提示会让离线期间已经错过的事项继续无人处理"
+                      if has_owner_cost else ""),
         dedup_key=f"absence:{int(report.end)}",
     )
     return bool(accepted)

@@ -1,6 +1,6 @@
 # Jarvis PRD Portfolio
 
-- Last updated: 2026-08-27
+- Last updated: 2026-08-29
 - Status: Authoritative portfolio index
 - Purpose: distinguish current product contracts from historical records,
   superseded designs, observation-only experiments, and rejected scope.
@@ -36,7 +36,7 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `prd_matter_workspace_mobile.md` | Superseded; fully retired 2026-08-14 | The Matter topic contract (cross-entry continuity, Matter detail) lives on in code. The Jarvis-owned mobile workspace, pairing, Web Push, `:3458`, and every Jarvis-owned Tailscale path are gone. The 2026-08-27 Codex-frontstage target does not revive them. |
 | `prd_unified_delivery_items.md` | Current, shipped | Canonical Item, attention routing, and delivery contract. |
 | `prd_cross_device_continuity.md` | Partially superseded | Handoff state machine still current; pairing and the 发到手机 direction are retired (REQ-120, 2026-08-11) — new handoffs may only target the desktop 接力区. |
-| `prd_companion_checkin.md` | Current, shipped 2026-08-03 | Checkin as a self-improving companion: tap gradient (「这类不必」), per-kind budget with floor/ceiling, silence as a recorded+alarmable state, conversation feedback into the prompt. |
+| `prd_companion_checkin.md` | Partially superseded 2026-08-29 | Tap gradient, declared kind, bounded ceiling and conversation feedback remain. Checkin is now an explicit private retained rhythm, disabled by default; silence debt, non-zero allowance floor and freshness alarm are retired. |
 | `prd_card_delivery_closure.md` | Partially superseded 2026-08-11 and 2026-08-27 | Honest tap outcomes (no-op ≠ ✓) and durable broadcast approvals remain current. The old Jarvis web/phone desk remains retired. Lark stays the deployed proactive transport during migration, but the long-term interactive surface is Codex desktop/mobile; long content must not be forced into Lark cards. |
 | `prd_verified_delegation.md` | Current, implementation complete; production graduation gated | The generic control plane, deterministic verifiers, projections, reconciler, shadow evaluation, and connector receipts are implemented. Automatic promotion remains fail-closed until the production shadow sample meets the PRD thresholds. |
 | `prd_2026_08_11_signal_over_noise.md` | Shipped baseline; surface ruling superseded 2026-08-27 | Per-source noise reduction, one ledger accounting (待批/已办/留中 summing to created), and mobile-gateway retirement remain current. Its "Lark only" ruling remains today's transport fact, not the product end state; the Codex-frontstage PRD now owns that direction. |
@@ -45,6 +45,12 @@ Historical PRDs remain evidence. This file is the portfolio authority.
 | `plans/2026-08-14-model-control-and-cross-product-memory.md` | Current, implementation in release verification | Separate upstream/model/harness policy, expose real fallback diversity, and add a private query-focused historical index across interactive Claude Code and Codex sessions. |
 | `plans/2026-08-15-lark-identity-transport.md` | Current, implementation in release verification | Separate application-bot OpenAPI delivery from owner OAuth so Keychain/calendar degradation cannot disable replies, cards, Memorials, or EigenFlux messages. |
 | `plans/2026-08-27-codex-frontstage-jarvis-backstage.md` | Active; Phase 0/1 implemented, production acceptance pending | Codex desktop/mobile is the primary interactive frontstage; Jarvis is the continuity and control plane; Git/GitHub is the native code-evidence plane; Lark is bounded wake-up/native integration. The repository has the provider-neutral run protocol and local Codex MCP/plugin connector. `codex_frontstage_completion_audit.md` separates implementation, release, and real-use proof. Migration remains fail-closed until 20 desktop and 20 mobile journeys pass. |
+| `plans/2026-08-28-lark-to-codex-wake-adapter.md` | Implemented release candidate; production/mobile acceptance pending | An explicit private-owner Lark action prepares and verifies one empty Codex task through app-server, records a Matter wake receipt, and starts no model turn or Matter lease. Repeats reuse an unused task; uncertainty falls back to the stable phrase. |
+| `plans/2026-08-28-provider-neutral-model-runtime.md` | Active; owner/heartbeat migration implemented locally, release pending | One effect-safe, task-attributed runtime covers auxiliary calls, primary heartbeat execution, and the owner-private Lark path. Shared/non-owner chat retains its narrower trust boundary. Unattended code mutation was separately retired on 2026-08-29; Phase 3 still needs review, release, and production receipt evidence. |
+| `plans/2026-08-28-owner-chat-model-runtime-migration.md` | Active; implementation candidate, release pending | Owner-private Lark delegates one turn to Model Runtime while shell retains trust, serialization, promotion, cancellation, action, and delivery ownership. Ambiguous tool-capable failures never replay across providers. |
+| `plans/2026-08-28-first-principles-interruption-audit-r21-r40.md` | Active; implementation candidate, release pending | Defines the first-principles owner-interruption contract, removes presence-driven messaging, and measures useful closure rather than activity. |
+| `plans/2026-08-28-codex-jarvis-product-audit-r41-r60.md` | Active; implementation candidate, release pending | Applies the strict “why Jarvis beyond Codex?” survival test across entry, continuity, mobile, Lark, Git, harness, release, pruning, and real acceptance. |
+| `plans/2026-08-28-coding-harness-release-authority.md` | Current retirement decision; local candidate, release pending | Records the failed containment assumption and retires all unattended code mutation. Jarvis stops at observation and Proposal; owner-started Codex/Claude Code tasks perform changes, and exact-SHA release authority remains separate. |
 
 ## 3. Active Work
 

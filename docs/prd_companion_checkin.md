@@ -1,10 +1,21 @@
 # PRD — Checkin as a companion that learns from the interaction
 
-Status: **implemented 2026-08-03** — `core/companion.py`, `tests/test_companion.py`
+Status: **cadence policy superseded 2026-08-29** — gradient and feedback remain;
+automatic silence debt and freshness alarms are retired
 Date: 2026-08-02
 Owner statement: *"the product is an idea, is that you can check in with me like an
 old friend… a friend who cares about me, help me, remind me, guide me. The friend
 can reorg and improve itself during my interaction."*
+
+> **Current ruling (R61-R80):** Codex desktop/mobile is the normal place for
+> Pascal to start substantive conversation. Checkin is now an optional retained
+> rhythm, disabled by default and enabled only by an exact private
+> `jarvis.yaml retained_rhythms.checkin: true`; at most two retained rhythms may
+> be active. A long quiet period is healthy and never creates a message debt.
+> The tap gradient, declared kind, bounded budget and silence ledger remain
+> useful instrumentation. The allowance floor, mandatory card after silence,
+> and `companion-voice` file-age alarm below are historical design, not current
+> behavior.
 
 ## 1. Why now
 

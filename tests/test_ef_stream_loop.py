@@ -259,6 +259,25 @@ def test_analysis_tool_transcript_is_discarded():
     ) == ""
 
 
+def test_eigenflux_aggregate_context_stays_valid_and_bounded():
+    entries = [{
+        "msg_id": f"msg-{index}",
+        "sender": "Peer",
+        "content": "原文" * 300,
+        "judgment": "判断" * 200,
+    } for index in range(20)]
+
+    encoded = efsl._context_payload(
+        {"external_event_ids": [f"msg-{index}" for index in range(20)]},
+        entries,
+    )
+    payload = json.loads(encoded)
+
+    assert len(encoded) <= 6000
+    assert len(payload["eigenflux_entries"]) <= 12
+    assert payload["external_event_ids"]
+
+
 def test_memorial_quiet_hours_queue_is_durable_acceptance(
     monkeypatch, tmp_path,
 ):
@@ -540,6 +559,13 @@ def test_healthy_churn_policy():
     # stream back and forth every second otherwise
     assert not efsl._healthy_churn(t + 1, replaced=True)
     assert not efsl._healthy_churn(t - 1, replaced=True)
+
+
+def test_quiet_stream_retries_slow_down_after_poll_fallback_takes_over():
+    assert efsl._quiet_retry_seconds(
+        efsl.QUIET_DEGRADED_THRESHOLD - 1) == 1
+    assert efsl._quiet_retry_seconds(
+        efsl.QUIET_DEGRADED_THRESHOLD) == efsl.QUIET_DEGRADED_RETRY_S
 
 
 def test_message_analysis_uses_text_only_shared_provider_chain(
@@ -830,7 +856,7 @@ def test_autoreply_prompt_removes_thanks_from_autoreply_whitelist(
     efsl._run_analysis('{"content":"thanks!"}', "conv-1", str(tmp_path), "")
 
     prompt = seen["prompt"]
-    handoff_at = prompt.index("【必须交给 Pascal")
+    handoff_at = prompt.index("【必须交给用户")
     assert "纯致谢" not in prompt[:handoff_at]  # not in the AUTOREPLY whitelist
     assert "纯致谢" in prompt[handoff_at:]      # explicitly routed to no-reply
 

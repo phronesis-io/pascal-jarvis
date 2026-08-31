@@ -8,6 +8,7 @@ failure feeding the circuit breaker, and the daemon deploy guard.
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -24,13 +25,14 @@ def test_components_manifest_loads_and_covers_critical_set():
     # here can die silently again.
     for required in ("admin", "ef-stream", "lark-sidecar",
                      "bot", "heartbeat-loop", "session-backup",
-                     "conversation-audit"):
+                     "conversation-audit", "watchdog-armed"):
         assert required in names, f"components.yaml missing {required}"
     # The silent stream must be critical (daemon probes). The dashboard —
     # the original 23-day corpse — is retired (2026-08-21) and must stay
     # out of the manifest rather than rot as a permanently-red entry.
     crit = {c["name"] for c in comps if c.get("critical")}
     assert "ef-stream" in crit
+    assert "watchdog-armed" in crit
     assert "dashboard" not in names
     # REQ-82: the audit had no scheduler mount and sat idle for 13 days —
     # Freshness must come from the latest completed audit, not database mtime:
@@ -374,6 +376,54 @@ def test_diag_pre_resolves_work_and_memory_dirs_without_inherited_env():
         f"MEMORY_DIR {memory_dir!r} does not derive from JARVIS_DIR's slug")
 
 
+def test_diag_intent_breach_check_does_not_misread_utc_date_as_last_24h(
+        tmp_path):
+    """The breach query must compare like-formatted local timestamps."""
+    import datetime as dt
+    import sqlite3
+    import subprocess
+
+    root = Path(__file__).parent.parent
+    lines = (root / "tasks" / "self_diagnostic_pre.sh").read_text(
+        encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.startswith('echo "--- Intent Lifecycle ---"'))
+    end = next(i for i, ln in enumerate(lines) if ln.startswith("# 7d."))
+    snippet = "\n".join(lines[start:end])
+
+    (tmp_path / "data").mkdir()
+    db = sqlite3.connect(str(tmp_path / "data" / "jarvis.db"))
+    db.execute(
+        "CREATE TABLE intentions (id TEXT, status TEXT, last_error TEXT, "
+        "triggered_at TEXT)")
+    utc_now = dt.datetime.now(dt.timezone.utc)
+    threshold_date = (utc_now - dt.timedelta(days=1)).date()
+    stale_local = dt.datetime(
+        threshold_date.year, threshold_date.month, threshold_date.day,
+        0, 0, 1)
+    stale = stale_local.strftime("%Y-%m-%dT%H:%M:%S")
+    fresh = (
+        dt.datetime.now().astimezone().replace(tzinfo=None)
+        - dt.timedelta(hours=1)
+    ).strftime("%Y-%m-%dT%H:%M:%S")
+    db.executemany(
+        "INSERT INTO intentions VALUES (?,?,?,?)",
+        [
+            ("int_stale", "expired", "auto-expired after 3 attempts", stale),
+            ("int_fresh", "expired", "auto-expired after 3 attempts", fresh),
+        ])
+    db.commit()
+    db.close()
+
+    result = subprocess.run(
+        ["bash", "-c", snippet], capture_output=True, text=True, timeout=30,
+        env={**os.environ, "JARVIS_DIR": str(tmp_path)})
+    assert "过去24小时有 1 个" in result.stdout, (
+        "the local 24h window did not include only the fresh breach "
+        f"(UTC/'T'-vs-space string comparison):\n"
+        f"{result.stdout}\n{result.stderr}")
+
+
 def test_pre_commit_hook_only_uses_tools_it_can_count_on():
     """A hook step that needs an absent tool exits 127 and reads as "no match".
 
@@ -392,6 +442,56 @@ def test_pre_commit_hook_only_uses_tools_it_can_count_on():
         f"pre-commit uses {optional} without a `command -v` guard — on a "
         "machine without them the step silently no-ops and the hook still "
         "reports success")
+
+
+def test_pre_commit_mtime_snapshot_does_not_inherit_deleted_file_status():
+    """A staged deletion must not abort the hook before its real checks.
+
+    With ``set -e``, the previous pipeline returned the last loop body's
+    ``[ -f deleted.py ]`` status. If the alphabetically last staged path was
+    deleted, the hook stopped after its opening line without an error message.
+    The file list is now materialized first and the existence check is an
+    ``if`` condition, whose false result is not the loop's exit status.
+    """
+    root = Path(__file__).parent.parent
+    hook = (root / "scripts" / "hooks" / "pre-commit").read_text(
+        encoding="utf-8"
+    )
+    assert "git diff --cached --name-only | while" not in hook
+    assert 'git diff --cached --name-only > "$STAGED_SNAP"' in hook
+    assert 'done < "$STAGED_SNAP"' in hook
+
+
+def test_git_hook_installer_supports_linked_worktrees(tmp_path):
+    """A linked worktree has a .git file, not a .git directory."""
+    root = Path(__file__).parent.parent
+    installer = (root / "scripts" / "install_git_hooks.sh").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        'rev-parse --path-format=absolute --git-path hooks/pre-commit'
+        in installer
+    )
+    assert '$ROOT/.git/hooks/pre-commit' not in installer
+
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    hooks = scripts / "hooks"
+    hooks.mkdir(parents=True)
+    (scripts / "install_git_hooks.sh").write_text(installer, encoding="utf-8")
+    source = hooks / "pre-commit"
+    source.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    result = subprocess.run(
+        ["bash", str(scripts / "install_git_hooks.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    installed = repo / ".git" / "hooks" / "pre-commit"
+    assert installed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert str(installed) in result.stdout
 
 
 def test_task_scripts_importing_core_put_repo_root_on_syspath():

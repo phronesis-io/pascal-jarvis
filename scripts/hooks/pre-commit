@@ -28,10 +28,14 @@ fi
 # Snapshot staged file mtimes — if any change between now and commit-end,
 # another process touched them concurrently.
 MTIME_SNAP=$(mktemp)
-git diff --cached --name-only | while IFS= read -r f; do
-  [ -f "$f" ] && stat -f "%m %N" "$f" >> "$MTIME_SNAP" 2>/dev/null
-done
-trap 'rm -f "$MTIME_SNAP"' EXIT
+STAGED_SNAP=$(mktemp)
+trap 'rm -f "$MTIME_SNAP" "$STAGED_SNAP"' EXIT
+git diff --cached --name-only > "$STAGED_SNAP"
+while IFS= read -r f; do
+  if [ -f "$f" ]; then
+    stat -f "%m %N" "$f" >> "$MTIME_SNAP" 2>/dev/null
+  fi
+done < "$STAGED_SNAP"
 
 if ! bash -n bot.sh 2>/dev/null; then
   echo "bot.sh has syntax errors"

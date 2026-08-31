@@ -30,28 +30,20 @@ def sentinel_present(text) -> bool:
         return False
     return any(IDLE_SENTINEL in line for line in str(text).splitlines())
 
+
 def is_idle_reply(text) -> bool:
-    """True when a model reply is the idle acknowledgement, not content.
+    """Return whether unstructured model output is an idle acknowledgement.
 
-    Post-hooks used to test ``"HEARTBEAT_OK" in raw`` — a bare substring
-    match. For prose that is the right, fail-silent direction (see
-    sentinel_present). For a structured JSON payload it is wrong: the Memory
-    Compiler batch quotes owner-operated Claude Code/Codex transcripts about
-    Jarvis itself, so a perfectly valid envelope can carry the token inside a
-    quoted source. That envelope was thrown away as "idle", the batch stayed
-    pending, and every 10-minute retry re-ran the same full sonnet call:
-    28.1h stuck on 2026-08-28 (143 calls) and 4.7h on 2026-08-29.
-
-    Rule: empty → idle; no token → content; token inside a parseable JSON
-    object → content (renderers still enforce sentinel_present on anything
-    user-facing); token anywhere in non-JSON text → idle.
+    This deliberately preserves the fail-silent sentinel rule: empty output
+    is idle, and any unstructured output containing ``HEARTBEAT_OK`` is idle.
+    Structured protocols that allow arbitrary quoted source text must parse
+    and validate their expected envelope before calling this helper. That
+    ordering prevents a quoted token from being mistaken for the model's
+    control signal without allowing arbitrary JSON to bypass the user-facing
+    guard.
     """
-    stripped = (text or "").strip()
-    if not stripped:
-        return True
-    if IDLE_SENTINEL not in stripped:
-        return False
-    return parse_json_response(stripped) is None
+    stripped = str(text or "").strip()
+    return not stripped or sentinel_present(stripped)
 
 # Patterns that indicate Claude (or the underlying tooling) returned an error
 # instead of a real answer. Post-scripts and the main bot reply path both
@@ -84,6 +76,7 @@ ERROR_PATTERNS: tuple[str, ...] = (
     "Failed to authenticate",
     "Prompt is too long",
     "autocompact is thrashing",
+    "Your organization has disabled Claude subscription access for Claude Code",
 )
 
 # Patterns checked anywhere in first 300 chars (substring match)
@@ -101,7 +94,7 @@ ERROR_SUBSTRINGS: tuple[str, ...] = (
 NOOP_REPLY_NEEDLES: tuple[str, ...] = (
     "no response requested",
     # Bare CLI failure of a helper call (e.g. the haiku tool-narrator) — six
-    # "🔧 Execution error" messages reached Pascal in the week of 7/13.
+    # "🔧 Execution error" messages reachedthe owner in the week of 7/13.
     "execution error",
 )
 
@@ -110,7 +103,7 @@ NOOP_REPLY_NEEDLES: tuple[str, ...] = (
 # 2026-06-10: a 403 auth failure rode out to the user 7 times in 12 hours as
 # "**Intent** | Failed to authenticate. API Error: 403 Request not allowed" —
 # the markdown header defeated the line-start check. They are NOT applied to
-# interactive replies: when Pascal debugs this very bot, a legitimate answer
+# interactive replies: when the owner debugs this very bot, a legitimate answer
 # may quote "API Error: 403" verbatim in its opening lines.
 PROACTIVE_ERROR_SUBSTRINGS: tuple[str, ...] = (
     "Failed to authenticate. API Error",
@@ -226,7 +219,7 @@ def plain_user_copy(text: str) -> str:
     )
 
 # Prompt-framing headers the model echoes back at the top of a task slice.
-# These reached Pascal's cards verbatim through 7/20 ("=== TASK: checkin ===",
+# These reached the owner's cards verbatim through 7/20 ("=== TASK: checkin ===",
 # "[CHECKIN]", "[2026-07-19 09:16] checkin") — fix the CLASS at the shared
 # boundary, not one task at a time (the 7/16 humanlaya lesson: per-task
 # patches let the family keep breeding).

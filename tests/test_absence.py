@@ -143,7 +143,32 @@ def test_emit_creates_one_notice_card(tmp_path, monkeypatch):
     # A receipt, never a page: no alert class, and a stable identity so a
     # daemon restart mid-report cannot double-send the same episode.
     assert kwargs["attention"] == "notice"
+    assert kwargs["owner_need"] == "none"
+    assert kwargs["why_now"] == ""
     assert kwargs["dedup_key"] == f"absence:{int(report.end)}"
+
+
+def test_emit_only_interrupts_when_absence_had_owner_cost(tmp_path, monkeypatch):
+    from core import memorial
+
+    (tmp_path / "sched_events.jsonl").write_text(
+        '{"ts": "2026-08-18 21:19:33", "event": "intent_expired", '
+        '"name": "项目评审"}\n',
+        encoding="utf-8",
+    )
+    calls = []
+    monkeypatch.setattr(
+        memorial, "create",
+        lambda **kwargs: (calls.append(kwargs) or ("mem_1", True)),
+    )
+    report = absence.Report(start=at(17, 21, 12), end=at(19, 13, 2),
+                            slept_seconds=39 * 3600,
+                            active_seconds=16 * 3600, gaps=38)
+
+    assert absence.emit(tmp_path, report) is True
+    assert calls[0]["owner_need"] == "external_change"
+    assert calls[0]["why_now"]
+    assert calls[0]["work_receipt"]
 
 
 def test_reported_sleep_never_exceeds_the_window(tmp_path):

@@ -338,7 +338,7 @@ def test_index_excludes_managed_provider_calls_and_removes_deleted_sources(tmp_p
     assert cross_session_index.index_stats(db_path=db)["turns"] == 0
 
 
-def test_default_owner_context_never_injects_raw_history_but_explicit_search_can(
+def test_owner_context_falls_back_to_recent_redacted_history_and_keeps_search(
     tmp_path, monkeypatch,
 ):
     jarvis = tmp_path / "jarvis"
@@ -357,10 +357,30 @@ def test_default_owner_context_never_injects_raw_history_but_explicit_search_can
         "董责险跨 Agent 转发", root=jarvis,
     )
 
-    assert focused == ""
-    assert generic == ""
+    assert "Recent External Work Sessions" in focused
+    assert "董责险跨 Agent 转发" in focused
+    assert "Recent External Work Sessions" in generic
     assert "Relevant Historical Work Sessions" in explicit
     assert "董责险跨 Agent 转发" in explicit
+
+
+def test_compiled_memory_prevents_recent_session_fallback(tmp_path, monkeypatch):
+    jarvis = tmp_path / "jarvis"
+    codex = tmp_path / "codex"
+    jarvis.mkdir()
+    _codex(codex / "recent.jsonl", "recent-codex", "不应重复注入的原文")
+    monkeypatch.setenv("JARVIS_DIR", str(jarvis))
+    monkeypatch.setenv("CROSS_SESSION_CLAUDE_ROOT", str(tmp_path / "claude"))
+    monkeypatch.setenv("CROSS_SESSION_CODEX_ROOT", str(codex))
+    monkeypatch.setattr(
+        "core.memory_compiler.compiled_context",
+        lambda *_args, **_kwargs: "## Compiled Cross-Product Memory\n- 已编译结论",
+    )
+
+    rendered = _external_work_context(jarvis, "继续")
+
+    assert "已编译结论" in rendered
+    assert "不应重复注入的原文" not in rendered
 
 
 def test_identical_turns_in_different_sessions_do_not_collide(tmp_path):

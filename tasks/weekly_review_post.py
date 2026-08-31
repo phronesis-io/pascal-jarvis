@@ -35,17 +35,22 @@ def main() -> int:
             or report.get("schema") != "jarvis.matter-review.v1"):
         return 1
 
-    body = render_matter_review(report)
+    if not report.get("material"):
+        _stamp_success()
+        return 0
+
+    body = render_matter_review(report, per_section=1)
     if body:
+        summary = body.splitlines()[0]
         card = build_rich_card(
             header="📋 周省",
-            summary=body,
+            summary=summary,
             sections=[{"type": "markdown", "content": body}],
             meta={
                 "source": "weekly_review",
                 "date": now_local_str("%Y-%m-%d"),
             },
-            work_receipt="核对本周 Matter 完成收据、待收口产出和下一步",
+            work_receipt="已核对本周完成证据、待收口产出和下一步",
         )
         if not card:
             return 1

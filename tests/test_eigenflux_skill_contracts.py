@@ -6,7 +6,9 @@ docs are therefore runtime behavior, not passive README text.
 """
 
 from pathlib import Path
+import os
 import re
+import subprocess
 
 import pytest
 
@@ -94,6 +96,17 @@ def test_communication_skill_keeps_jarvis_verified_message_contract():
     assert "--repeat-token" in skill
 
 
+def test_automated_reports_never_embed_one_time_dashboard_codes():
+    message = _read("ef-communication/references/message.md")
+    profile = _read("ef-profile/SKILL.md")
+
+    assert "Carry the stable dashboard link" in message
+    assert "Never run `eigenflux dashboard`" in message
+    assert "Automated reports, heartbeat pushes" in profile
+    assert "Never put a one-time login code" in profile
+    assert "valid for about 15 minutes" in profile
+
+
 def test_public_skill_bundle_does_not_activate_staged_v2_commands():
     broadcast = _read("ef-broadcast/SKILL.md")
     profile = _read("ef-profile/SKILL.md")
@@ -169,4 +182,83 @@ def test_preinstall_source_repos_can_be_overridden_for_worktrees():
     assert 'REPOS_DIR="${JARVIS_REPOS_DIR:-$(dirname "$JARVIS_DIR")}"' in script
     assert 'PLUGIN_DIR="${EIGENFLUX_PLUGIN_DIR:-$REPOS_DIR/eigenflux-claude-plugin}"' in script
     assert 'MAIN_DIR="${EIGENFLUX_MAIN_DIR:-$REPOS_DIR/eigenflux}"' in script
+    assert 'git -C "$MAIN_DIR" rev-parse --git-dir' in script
+    assert 'git -C "$PLUGIN_DIR" rev-parse --git-dir' in script
+    assert '[ ! -d "$MAIN_DIR/.git" ]' not in script
+    assert '[ -d "$repo/.git" ]' not in script
     assert 'mkdir -p "$(dirname "$STATE_FILE")"' in script
+
+
+def test_preinstall_is_detect_only_unless_a_maintainer_explicitly_applies():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+
+    assert "EIGENFLUX_PREINSTALL_APPLY" in script
+    assert "APPLY_SKILL_SYNC=false" in script
+    assert 'retire_args+=(--dry-run)' in script
+    assert "deployed source left untouched" in script
+    assert 'if [ "$APPLY_SKILL_SYNC" = true ]' in script
+    assert "named non-main maintenance worktree" in script
+    assert "refused while this checkout owns a live Jarvis bot" in script
+    assert 'kill -0 "$live_bot_pid"' in script
+    assert 'if [ "$APPLY_SKILL_SYNC" = true ] || [ "$skill_change_count" -eq 0 ]' in script
+
+
+def test_preinstall_distinguishes_network_eof_from_contract_rejection():
+    script = (ROOT / "tasks" / "eigenflux_preinstall_pre.sh").read_text(
+        encoding="utf-8")
+
+    assert "inconclusive (transient network failure)" in script
+    assert "feedback write regression" in script
+    assert "EOF|timed? ?out|connection (reset|refused)" in script
+
+
+def test_preinstall_apply_refuses_main_and_live_runtime(tmp_path):
+    script = ROOT / "tasks" / "eigenflux_preinstall_pre.sh"
+
+    main = tmp_path / "main"
+    main.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main", str(main)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    main_result = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **os.environ,
+            "JARVIS_DIR": str(main),
+            "EIGENFLUX_PREINSTALL_APPLY": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert main_result.returncode == 0
+    assert "named non-main maintenance worktree" in main_result.stdout
+    assert main_result.stdout.rstrip().endswith("PREINSTALL_FAIL")
+
+    live = tmp_path / "maintenance"
+    live.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "maintenance", str(live)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (live / ".bot.pid").write_text(str(os.getpid()), encoding="utf-8")
+    live_result = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **os.environ,
+            "JARVIS_DIR": str(live),
+            "EIGENFLUX_PREINSTALL_APPLY": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert live_result.returncode == 0
+    assert "refused while this checkout owns a live Jarvis bot" in live_result.stdout
+    assert live_result.stdout.rstrip().endswith("PREINSTALL_FAIL")

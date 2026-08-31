@@ -3,7 +3,7 @@
 
 A persistent background process that:
 1. Periodically checks Jarvis health (bot.sh, heartbeat, Lark listener)
-2. On failure: notifies Pascal via Lark + auto-restarts
+2. On failure: notifies the owner via Lark + auto-restarts
 3. Stays alive forever — designed to be managed by launchd (KeepAlive)
 
 This is the ONE process that must never die. It's intentionally minimal
@@ -212,42 +212,11 @@ def log(level: str, msg: str):
 
 
 # How the delivery state machine can dispose of a Guardian alert. Only the
-# LOST set means "Pascal will never see this" — everything else either already
+# LOST set means "the owner will never see this" — everything else either already
 # reached him, is still in flight, or is a deliberate de-duplication of an
 # alert he has. Treating them all as failure is what produced 322 ERROR lines
 # and 322 macOS banners titled "Lark链路不通" over two days in which the Lark
 # link was fine (2026-08-16/17): the dead-letter consumer only marks its rows
-# notified when notify_lark returns True, so every "duplicate" verdict left
-# the rows pending and re-alerted them ~2min later, forever.
-_ALERT_REACHED_STATES = {"delivered", "read", "acted"}
-_ALERT_IN_FLIGHT_STATES = {"queued", "attempting"}
-# A metric cap is reached only when another active envelope with the same
-# incident throttle key already exists. It therefore means "covered by the
-# existing incident", not "this new row was delivered".
-_ALERT_COVERED_REASONS = {"metric_daily_cap"}
-
-
-def _alert_disposition(result) -> tuple[str, str]:
-    """(disposition, one-line explanation) for a Guardian delivery result.
-
-    ``confirmed`` and ``covered`` may close the source incident. ``pending``
-    means the durable envelope is still responsible for delivery, so it must
-    neither close a dead-letter row nor raise a local failure banner. ``lost``
-    is the only state that escalates out of band.
-    """
-    state = str(getattr(result, "state", "") or "")
-    reason = str(getattr(result, "reason", "") or "")
-    if state in _ALERT_REACHED_STATES:
-        return "confirmed", "delivered"
-    if not getattr(result, "accepted", False):
-        return "lost", f"delivery refused the alert (state={state}, {reason})"
-    if state in _ALERT_IN_FLIGHT_STATES:
-        return "pending", f"queued for delivery ({reason or 'retrying'})"
-    if state == "suppressed" and reason in _ALERT_COVERED_REASONS:
-        return "covered", f"same incident already active ({reason})"
-    return "lost", f"alert dropped (state={state}, reason={reason})"
-
-
 def _raise_banner(msg: str, why: str) -> None:
     """Local macOS notification — the daemon's only out-of-band channel.
 
@@ -290,7 +259,7 @@ def _raise_banner(msg: str, why: str) -> None:
 
 
 def notify_lark(msg: str, incident_key: str = "") -> bool | None:
-    """Submit a Guardian alert to the unified delivery state machine.
+    """Submit a Guardian alert as an owner-private actionable card.
 
     The daemon remains model-independent and keeps the macOS banner as its
     truly out-of-band fallback. Retry, dedup, throttle, and queueing are no
@@ -308,45 +277,32 @@ def notify_lark(msg: str, incident_key: str = "") -> bool | None:
         return False
     try:
         import hashlib
-        from core.delivery import DeliveryEnvelope, deliver
+        from core import memorial
 
         stable = re.sub(r"[^a-zA-Z0-9:_-]+", "-", str(incident_key).strip())
         metric = stable[:80] if stable else hashlib.sha256(
             " ".join(str(msg).split()).encode("utf-8")).hexdigest()[:20]
-        result = deliver(
-            DeliveryEnvelope(
-                source="guardian-daemon",
-                kind="text",
-                payload={"text": f"🛡️ **系统守护**\n\n{msg}"},
-                attention="alert",
-                requested_channel="lark",
-                urgent=True,
-                dedup_key=f"guardian:{metric}",
-                throttle_key=f"guardian:{metric}",
-                metadata={
-                    "metric_daily_cap": 1,
-                    "incident_key": metric,
-                    # Same incident is quiet for one day, not forever. Stable
-                    # object ids elsewhere keep permanent idempotency.
-                    "dedup_window_seconds": 24 * 3600,
-                    "audience": "owner_private",
-                    "recipient_type": "open_id",
-                    "replayable": False,
-                    # A dead letter about this dead letter would recurse
-                    # forever during a Lark outage.
-                    "suppress_dead_letter": True,
-                },
-            ),
-            root=JARVIS_DIR,
+        memorial_id, accepted = memorial.create(
+            source="guardian-daemon",
+            title="系统守护",
+            body=str(msg),
+            options=[{"key": "ack", "label": "知道就行"}],
+            attention=memorial.ATTENTION_ALERT,
+            urgent=True,
+            dedup_key=f"guardian:{metric}",
+            work_receipt="已自动检查、尝试恢复并复查当前状态",
         )
-        disposition, why = _alert_disposition(result)
-        if disposition in {"confirmed", "covered"}:
-            if disposition == "covered":
-                log("INFO", f"Guardian incident already covered: {why}")
+        state = memorial.get_memorial(memorial_id) or {}
+        delivery_status = str(state.get("delivery_status") or "")
+        if delivery_status == "delivered":
             return True
-        if disposition == "pending":
-            log("INFO", f"Guardian alert remains in flight: {why}")
+        if delivery_status in {"queued", "retry_queued"}:
+            log("INFO", "Guardian card remains queued for verified delivery")
             return None
+        if accepted and state.get("status") == "pending":
+            log("INFO", "Guardian incident already covered by its existing card")
+            return True
+        why = f"guardian card not delivered (status={delivery_status or 'unknown'})"
         log("ERROR", f"Guardian alert lost: {why}")
     except Exception as e:
         log("ERROR", f"Lark notify failed: {e}")
@@ -452,7 +408,7 @@ def _observe_absence(gap_seconds: float) -> None:
     The grace paths above are deliberately quiet about sleep — a restart or a
     component page over a lid-close would be wrong. But quiet about the
     *restart* became quiet about the absence itself: 08-17→08-19 the host was
-    gone 39h, this daemon said so 38 times in its own log, and Pascal found
+    gone 39h, this daemon said so 38 times in its own log, and the owner found
     out from an audit. Sleep is normal; a working day spent asleep is worth
     one card (policy lives in core.absence).
 
@@ -663,7 +619,7 @@ def _is_lark_listener_alive(bot_pid: int | None = None) -> bool | None:
 
 # check_health's issue strings are internal identifiers (logs, tests,
 # conversation_audit all match on them). Anything that reaches a card goes
-# through here first: Pascal reads 「bot.sh is not running」as noise, and the
+# through here first:the owner reads 「bot.sh is not running」as noise, and the
 # card-style contract says every user-facing line is plain Chinese.
 _ISSUE_TEXTS = {
     "bot.sh is not running": "机器人主进程停了",
@@ -848,10 +804,10 @@ def _health_payload(body: bytes) -> dict | None:
     return None
 
 
-# What each component is called when talking to Pascal — alerts carry these,
+# What each component is called when talking to the owner— alerts carry these,
 # never the internal names/raw /health fields (feedback 7/8: he should not
 # have to decode status=degraded / priority_wedged=[...]).
-# Guardian messages are reserved for incidents that need Pascal to act.
+# Guardian messages are reserved for incidents that need the owner to act.
 # Successful/ongoing self-repair stays in daemon.log: a message whose only
 # instruction is "you do not need to do anything" spends attention without
 # giving him a decision.
@@ -893,7 +849,7 @@ def _task_labels(ids) -> dict[str, str]:
 
 
 def _note_degraded_health(name: str, payload: dict | None, http_code=None):
-    """Record a live component's non-ok health without paging Pascal.
+    """Record a live component's non-ok health without paging the owner.
 
     A responding component still owns its retry/fallback path.  These are
     engineering diagnostics, not owner decisions; surfacing them produced
@@ -942,7 +898,7 @@ _DEADLETTER_KIND_LABELS = {
 # card (memorial_queue_expired had no label and shipped like that). The kind
 # still goes to the log; the card gets a sentence.
 _DEADLETTER_FALLBACK_LABEL = "有消息没送出去"
-# Producer details are written for whoever reads the JSONL, not for Pascal:
+# Producer details are written for whoever reads the JSONL, not for the owner:
 # ef-stream dead-letters the raw message body (a card's JSON when a card
 # failed), and delivery_failures writes English. A boss-facing card carries
 # neither (feedback-card-style-contract, feedback-no-jargon-dashboards).
@@ -1049,7 +1005,7 @@ def consume_delivery_deadletters():
         n = sum(len(v) for v in by_kind.values())
         log("WARN", f"Delivery dead-letters: {n} row(s), kinds={sorted(by_kind)}")
         # provider_failover 是状态通知，不是没送出去的消息 —— 内容本身就是
-        # 给 Pascal 的一句人话（“已切到备用通道”/“已切回”），套“消息没送
+        # 给用户的一句人话（“已切到备用通道”/“已切回”），套“消息没送
         # 出去”的帽子是在报假警（red-team 7/8）。单独原文发出，不截断
         # （producer 端已限 500 字）；同一批里新旧几条只发最新一条 ——
         # trip+clear 同批时，把已过时的“切换”播报补发出去等于恢复后又喊
@@ -1184,7 +1140,7 @@ _MANIFEST_COVERED = {"bot", "heartbeat-loop", "lark-sidecar", "admin"}
 
 
 def _component_down_text(label: str, detail: str) -> str:
-    """What to tell Pascal about a red manifest-critical component.
+    """What to tell the owner about a red manifest-critical component.
 
     Every red used to render as 「组件失联：X 没有在运行」. On 2026-08-18 02:16
     that sentence went out about ef-stream while the ef-stream process was
@@ -1358,6 +1314,7 @@ def _check_brain_health():
         grace_until = prev.get("grace_until", 0) or 0
         repair_requested_at = prev.get("repair_requested_at", 0) or 0
         repair_request_ok = bool(prev.get("repair_request_ok", True))
+        deadman_withhold = bool(prev.get("deadman_withhold", False))
         # Suppression ledger (audit 7/10): {"since": ts, "windows": n} — how
         # long / across how many awake windows the SAME brain-dead verdict
         # has been swallowed by grace. Persisted so it survives sleeps and
@@ -1396,6 +1353,7 @@ def _check_brain_health():
             suppressed = {}
             repair_requested_at = 0
             repair_request_ok = True
+            deadman_withhold = False
         elif in_grace:
             if not suppressed:
                 suppressed = {"since": now, "windows": 1}
@@ -1441,6 +1399,7 @@ def _check_brain_health():
                         f"{BRAIN_RECOVERY_GRACE // 60}min before alert")
                 else:
                     new_last_alert = now
+                    deadman_withhold = True
                     # Tag goes at the END: conversation_audit.py classifies on
                     # the literal "BRAIN-DEAD heartbeat:" prefix.
                     tag = (" [persisted across post-wake grace]" if in_grace
@@ -1460,6 +1419,7 @@ def _check_brain_health():
         new_state = {"samples": result["samples"], "last_alert": new_last_alert,
                      "last_check_ts": now, "grace_until": grace_until,
                      "brain_dead": bool(result["brain_dead"]),
+                     "deadman_withhold": deadman_withhold,
                      "suppressed": suppressed,
                      "repair_requested_at": repair_requested_at,
                      "repair_request_ok": repair_request_ok}
@@ -1579,7 +1539,7 @@ def _check_diag_staleness():
         if warnings and not actionable:
             # The post-script normally writes this shared receipt. If its
             # delivery leg failed, Guardian still acknowledges automatically
-            # owned diagnostics without assigning engineering work to Pascal.
+            # owned diagnostics without assigning engineering work to the owner.
             try:
                 previous = json.loads(DIAG_ALERT_STAMP.read_text()) or {}
             except (OSError, ValueError, TypeError):
@@ -1600,7 +1560,7 @@ def _check_diag_staleness():
         # Content-aware (REQ-109): re-send only for warnings the stamped set
         # has never carried, or as a 24h reminder. The old window-only check
         # ping-ponged with the post's dedup — the same persisting warning
-        # reached Pascal every 8h, each time claiming the primary path broke.
+        # reached the owner every 8h, each time claiming the primary path broke.
         try:
             stamp = json.loads(DIAG_ALERT_STAMP.read_text()) or {}
         except (OSError, ValueError, TypeError):
@@ -1631,7 +1591,7 @@ def _check_diag_staleness():
 
 
 def _remind_breaker_latched():
-    """While the breaker stays latched, remind Pascal at most once per day —
+    """While the breaker stays latched, remindthe owner at most once per day —
     a latched breaker plus a dead stack is otherwise a silent outage (the
     latch alert itself fires exactly once). Reminder stamp lives inside the
     latch file so it dies with the latch. Never raises."""
@@ -1724,7 +1684,7 @@ def _session_lock_pid_is_ours(pid: int) -> bool:
     (An `or "claude" in args` fallback was removed 7/8 red-team: a legitimate
     lock holder can never show 'claude', so the substring arm could only ever
     match a recycled PID landing on someone ELSE's claude process — e.g.
-    Pascal's interactive Claude Code session — the exact wrong-kill this check
+   the owner's interactive Claude Code session — the exact wrong-kill this check
     exists to prevent, and the substring-matching class the 7/7 watchdog
     postmortem banned. If the subshell ever execs claude directly, add an
     anchored full-path match then.)"""
@@ -1934,7 +1894,7 @@ def diagnose_and_fix(issues: list[str]) -> str:
         msg = f"Auto-restart successful (attempt {restart_count})"
         log("INFO", msg)
         # A self-heal that completed without owner involvement is internal
-        # operational evidence, not a reason to interrupt Pascal. If a
+        # operational evidence, not a reason to interrupt the owner. If a
         # breaker alert was already raised, _clear_breaker_latch below still
         # sends the matching recovery receipt so a real human-facing incident
         # cannot remain open.
@@ -2038,7 +1998,11 @@ def _ping_external_deadman() -> str:
             brain_state = json.loads(BRAIN_STATE_FILE.read_text())
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             brain_state = {}
-        if (brain_state.get("brain_dead")
+        # A raw brain-dead candidate is not enough to withhold the external
+        # liveness receipt: post-wake grace, offline deferral and the recovery
+        # verification window can all leave that candidate true temporarily.
+        # Only the persisted verified verdict may suppress the independent ping.
+        if (brain_state.get("deadman_withhold")
                 and time.time() - float(brain_state.get("last_check_ts") or 0)
                 < BRAIN_CHECK_GAP_THRESHOLD):
             key = "deadman|withheld-brain-dead"

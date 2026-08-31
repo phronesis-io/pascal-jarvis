@@ -2,7 +2,7 @@
 
 When the lark-cli user token drops, every ``--as user`` channel (calendar,
 mail, group ingest) goes dark. The recovery has been proven hands-free since
-2026-07-05: start the device flow, hand Pascal the verification link in
+2026-07-05: start the device flow, hand the owner the verification link in
 Feishu, poll in the background, receipt on success. Before this module that
 sequence lived only in operator memory — the「现在授权」card button could not
 run it, so tapping it led nowhere (the 2026-08-07 dead end).
@@ -47,7 +47,7 @@ def _cli_env() -> dict:
 
 
 def _owner_open_id() -> str:
-    """Pascal's open_id: USER_ID env (bot.sh exports it) → jarvis.yaml."""
+    """the owner's open_id: USER_ID env (bot.sh exports it) → jarvis.yaml."""
     uid = os.environ.get("USER_ID", "").strip()
     if uid:
         return uid

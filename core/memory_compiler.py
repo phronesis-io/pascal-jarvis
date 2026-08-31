@@ -36,6 +36,10 @@ from core.memory_compiler_common import (
     source_authority,
 )
 from core.memory_compiler_sources import prepare_batch as _prepare_batch
+from core.memory_compiler_sources import (
+    pending_batch as _pending_batch,
+    record_batch_failure as _record_batch_failure,
+)
 from core.safety import parse_json_response
 
 
@@ -396,6 +400,18 @@ def prepare_batch(
     )
 
 
+def pending_compile_batch() -> dict[str, Any] | None:
+    """Expose pending retry state without returning private batch payloads."""
+    return _pending_batch()
+
+
+def record_compile_failure(
+    error: str, *, batch_id: str = "", now: float | None = None,
+) -> dict[str, Any] | None:
+    """Persist one provider/post-hook failure for the pending compile batch."""
+    return _record_batch_failure(error, batch_id=batch_id, now=now)
+
+
 def apply_compile_result(
     value: str | dict[str, Any], *, now: float | None = None,
 ) -> dict[str, Any]:
@@ -415,10 +431,31 @@ def apply_compile_result(
     if not isinstance(claims_raw, list) or not isinstance(ignored_raw, list):
         raise MemoryCompilerError("claims and ignored_source_refs must be lists")
     counts: dict[str, int] = {}
-    claims = [_validate_claim(item, sources, counts) for item in claims_raw]
+    claims: list[dict[str, Any]] = []
+    rejected_claims: list[dict[str, str]] = []
+    rejected_sources: set[str] = set()
+    for item in claims_raw:
+        source_ref = (
+            str(item.get("source_ref") or "").strip()
+            if isinstance(item, dict) else ""
+        )
+        trial_counts = dict(counts)
+        try:
+            validated = _validate_claim(item, sources, trial_counts)
+        except MemoryCompilerError as exc:
+            rejected_claims.append({
+                "source_ref": source_ref,
+                "error": str(exc)[:240],
+            })
+            if source_ref in sources:
+                rejected_sources.add(source_ref)
+            continue
+        counts = trial_counts
+        claims.append(validated)
     ignored = [str(item or "").strip() for item in ignored_raw]
     if len(set(ignored)) != len(ignored) or any(item not in sources for item in ignored):
         raise MemoryCompilerError("ignored_source_refs contains an invalid reference")
+    ignored.extend(sorted(rejected_sources - set(counts) - set(ignored)))
     covered = set(counts).union(ignored)
     if covered != set(sources):
         missing = sorted(set(sources) - covered)
@@ -468,6 +505,8 @@ def apply_compile_result(
         "source_count": len(sources),
         "claim_count": len(claims),
         "ignored_count": len(ignored),
+        "rejected_claim_count": len(rejected_claims),
+        "rejected_claims": rejected_claims,
         "outcomes": outcomes,
         "new_conflict_ids": conflicts,
         "needs_review": bool(conflicts),
@@ -773,6 +812,7 @@ def compiler_status() -> dict[str, Any]:
         "pending_batches": int(db.execute(
             "SELECT COUNT(*) FROM memory_compile_batches WHERE status='pending'"
         ).fetchone()[0]),
+        "pending_batch": pending_compile_batch(),
         "open_conflicts": int(db.execute(
             "SELECT COUNT(*) FROM memory_conflicts WHERE status='open'"
         ).fetchone()[0]),

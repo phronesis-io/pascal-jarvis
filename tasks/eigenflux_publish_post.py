@@ -118,6 +118,10 @@ def main() -> int:
     mem_id, _ = memorial.create(
         source="eigenflux-publish", title="EigenFlux 广播待确认",
         work_receipt="完成广播草稿整理、来源绑定和发布参数校验",
+        owner_need="authority",
+        why_now="广播草稿已经准备完成，对外发布仍需本人授权",
+        owner_action="确认发布，或取消这份广播草稿",
+        silence_cost="不提示会让已经准备好的对外广播停在未授权状态",
         body=preview, options=options, send=False,
         context=f"pending_publish id={pending_id}",
         # This card carries 发/不发 buttons: it IS a decision. Explicit so the
@@ -129,7 +133,7 @@ def main() -> int:
     # this link to file the card as 留中 when an unanswered draft expires.
     pending_data["memorial_id"] = mem_id
     atomic_write(pending_file, json.dumps(pending_data, ensure_ascii=False))
-    print(memorial.card_json(mem_id))
+    print(memorial.pipeline_card_json(mem_id))
     print(f"[eigenflux-publish] Pending approval: {pending_id} — {content[:80]}", file=sys.stderr)
 
     return 0

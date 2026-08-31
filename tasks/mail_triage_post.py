@@ -148,13 +148,25 @@ def main() -> int:
                 # lane; a plain surfaced email stays a notice.
                 attention=("alert" if urgent
                            else ("decision" if draft_id else "notice")),
+                owner_need=("deadline" if urgent else
+                            ("judgment" if draft_id else "external_change")),
+                why_now=("邮件带有明确时效风险" if urgent else
+                         "新邮件已经完成筛选，需要审阅草稿" if draft_id else
+                         "外部联系人发来了值得知道的新信息"),
+                owner_action=("立即处理这封有时效风险的邮件" if urgent else
+                              "审阅并决定是否发送草稿" if draft_id else
+                              "只需知悉；要处理时再继续"),
+                silence_cost=("不提示会错过邮件的明确时效窗口" if urgent else
+                              "不提示会让已准备的回复草稿停在未审阅状态"
+                              if draft_id else
+                              "不提示会让已筛出的重要外部联系无人知晓"),
                 context=(f"mail event_id={item['event_id']}"
                          if item["event_id"] else ""),
             )
             # send=False + this print is the caller-owned-transport pattern
             # (same as intentions/exercise-week): heartbeat_loop applies
             # quiet-hour deferral, the daily budget, and delivery bookkeeping.
-            print(memorial.card_json(mem_id))
+            print(memorial.pipeline_card_json(mem_id))
     except Exception as e:
         print(f"[mail-triage] memorial failed: {e}",
               file=sys.stderr)

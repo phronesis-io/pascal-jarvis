@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -143,6 +144,39 @@ def test_review_excludes_live_work_from_the_next_action_shortlist(tmp_path):
     encoded = str(report)
     assert "raw_transcript" not in encoded
     assert "receipt_json" not in encoded
+
+
+def test_review_treats_an_expired_running_lease_as_actionable(tmp_path):
+    now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    matter = create_matter(
+        "睡眠后恢复", next_action="重新接续这项工作",
+    )
+    started = start_matter_run(
+        matter_id=matter["id"], task="before sleep", workspace=str(tmp_path),
+    )
+    db = db_module.get_db()
+    db.execute(
+        "UPDATE matter_runs SET lease_expires_epoch=? WHERE id=?",
+        (now.timestamp() - 1, started["run"]["id"]),
+    )
+    db.commit()
+
+    report = build_matter_review(now=now)
+
+    assert report["summary"]["active_runs"] == 0
+    assert matter["id"] in {item["id"] for item in report["next_actions"]}
+
+
+def test_weekly_review_recovers_expired_runs_before_building_the_read_model():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "tasks"
+        / "weekly_review_pre.sh"
+    ).read_text(encoding="utf-8")
+
+    assert source.index("recover_expired_runs") < source.index(
+        "-m core.matter_review"
+    )
 
 
 def test_review_does_not_call_an_unreceipted_released_run_an_output(tmp_path):

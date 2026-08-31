@@ -1,7 +1,7 @@
 """Tests for core.safety — error pattern detection."""
 
-import json
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -114,6 +114,15 @@ def test_claude_weekly_limit_caught_in_interactive_reply():
 def test_claude_weekly_limit_caught_even_under_card_header():
     text = "**Intent**\n\nYou've hit your weekly limit · resets Aug 15 at 3am"
     assert looks_like_error(text, proactive=True) is True
+
+
+def test_claude_organization_access_error_is_never_user_copy():
+    text = (
+        "Your organization has disabled Claude subscription access for "
+        "Claude Code"
+    )
+    assert looks_like_error(text) is True
+    assert looks_like_error(f"**Intent**\n\n{text}", proactive=True) is True
 
 
 def test_account_limit_variants_share_provider_classifier():
@@ -374,51 +383,22 @@ def test_atomic_write_replace_failure_keeps_old_file_and_cleans_temp(
     assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
 
 
-# --- is_idle_reply: the idle token inside a JSON payload is data, not idle ---
-
-def test_idle_reply_bare_token_and_empty():
-    assert is_idle_reply("HEARTBEAT_OK")
+def test_idle_reply_preserves_fail_silent_unstructured_contract():
     assert is_idle_reply("")
-    assert is_idle_reply("   \n")
+    assert is_idle_reply("HEARTBEAT_OK")
+    assert is_idle_reply("nothing noteworthy\n\nHEARTBEAT_OK")
+    assert is_idle_reply('{"response": "HEARTBEAT_OK"}')
+    assert not is_idle_reply("今天有一件值得处理的事。")
 
 
-def test_idle_reply_token_leaked_in_prose_is_idle():
-    # "prose + trailing token" and inline leaks stay silent (fail-safe for cards)
-    assert is_idle_reply("nothing noteworthy today.\n\nHEARTBEAT_OK")
-    assert is_idle_reply("🌿 关怀 / HEARTBEAT_OK + internal reasoning")
-    assert is_idle_reply("回复: HEARTBEAT_OK")
-
-
-def test_idle_reply_plain_content_is_not_idle():
-    assert not is_idle_reply("今天的日程有三件事。")
-    assert not is_idle_reply('{"user_message": "提醒：明早九点开会"}')
-
-
-def test_idle_reply_token_quoted_inside_json_object_is_content():
-    # 2026-08-28/29: memory-compiler envelopes quoting Jarvis transcripts
-    # carried the token in a source quote and were dropped as idle for 28h.
-    envelope = json.dumps({
-        "schema": "jarvis.memory-candidates.v1",
-        "batch_id": "mcb_x",
-        "claims": [{
-            "source_ref": "session_turn:abc",
-            "quote": 'post 用 "HEARTBEAT_OK" in raw 判空把整批丢了',
-            "kind": "fact", "claim_key": "k", "content": "c",
-        }],
-        "ignored_source_refs": [],
-    }, ensure_ascii=False)
-    assert not is_idle_reply(envelope)
-    assert not is_idle_reply("```json\n" + envelope + "\n```")
-
-
-def test_no_post_hook_uses_bare_substring_idle_check():
-    """Every post hook must route idle detection through is_idle_reply."""
-    import re
+def test_no_active_post_hook_uses_bare_substring_idle_check():
     root = Path(__file__).resolve().parent.parent
     offenders = []
     for path in sorted((root / "tasks").glob("*.py")):
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
             code = line.split("#", 1)[0]
-            if re.search(r'"HEARTBEAT_OK"\s+in\s', code):
+            if re.search(r'["\']HEARTBEAT_OK["\']\s+in\s', code):
                 offenders.append(f"{path.name}:{lineno}")
     assert offenders == [], offenders

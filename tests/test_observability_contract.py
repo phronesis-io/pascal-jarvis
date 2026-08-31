@@ -15,7 +15,10 @@ HOT_PATHS = (
     "core/memorial.py",
     "core/memorial_transport.py",
 )
-LOG_CALLS = {"_ops_log", "log"}
+# Transport helpers accept an injected ``ops_log`` so the compatibility
+# facade can preserve its established test hook. It is still the same
+# structured sink contract, not an exemption from observable failure.
+LOG_CALLS = {"_ops_log", "ops_log", "log"}
 
 
 def _call_name(node: ast.Call) -> str:

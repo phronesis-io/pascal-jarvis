@@ -77,7 +77,7 @@ def test_post_queues_b_level_proposals_and_emits_digest(env):
             "summary": "收窄投资",
             "old": "- 旧投资规则",
             "new": "- 新投资规则（纯择时不推）",
-            "rationale": "Pascal 06-07 明确收窄",
+            "rationale": "用户06-07 明确收窄",
             "signal": "daily_log + 2 次确认",
         }],
         "digest": "🧬 提案 #1 收窄投资",

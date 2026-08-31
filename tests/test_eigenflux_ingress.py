@@ -96,7 +96,9 @@ def test_cache_reconciliation_delivers_raw_pm_and_records_msg_id(
     assert "msg-1" in load_seen(tmp_path / "eigenflux" / ".ef-seen")
     cards = memorial.list_memorials()
     assert len(cards) == 1
-    assert cards[0]["dedup_key"] == "eigenflux:msg-1"
+    assert cards[0]["dedup_key"].startswith("eigenflux-hour:")
+    assert cards[0]["body"].splitlines()[0].startswith("我看过了：")
+    assert "Powered by EigenFlux" not in cards[0]["body"]
     assert "需要你知道" in cards[0]["body"]
 
 
@@ -218,11 +220,14 @@ def test_tool_transcript_card_is_retired_before_safe_raw_replacement(
     assert states[mid]["status"] == "lapsed"
     replacements = [
         item for item in states.values()
-        if item["id"] != mid and item.get("dedup_key") == "eigenflux:msg-1"
+        if item["id"] != mid
+        and str(item.get("dedup_key") or "").startswith("eigenflux-hour:")
     ]
     assert len(replacements) == 1
     assert replacements[0]["status"] == "pending"
-    assert replacements[0]["body"].endswith("只传递这段安全原文\n\n📡 Powered by EigenFlux")
+    assert "只传递这段安全原文" in replacements[0]["body"]
+    assert replacements[0]["body"].splitlines()[0].startswith("我看过了：")
+    assert "Powered by EigenFlux" not in replacements[0]["body"]
     assert "Tool:" not in replacements[0]["body"]
     assert sent == [True, True]
 
@@ -245,7 +250,13 @@ def test_reconcile_bounds_delivery_attempts_and_reports_remaining_gap(
     assert result.status == "degraded"
     assert result.accepted == 3
     assert result.unresolved_failures == 2
-    assert len(sent) == 3
+    # Three receipts are accepted, but one hourly card spends attention.
+    assert len(sent) == 1
+    cards = memorial.list_memorials()
+    assert len(cards) == 1
+    assert "这小时共 3 封" in cards[0]["body"]
+    context = json.loads(cards[0]["context"])
+    assert context["external_event_ids"] == ["msg-0", "msg-1", "msg-2"]
 
 
 def test_fetch_failure_preserves_error_health_without_user_output(

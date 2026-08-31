@@ -152,13 +152,13 @@ _SYSTEM_TAIL_KEEP_FILES = {
 # todos (13.7k) and engineering_roadmap (11.0k) had none. Those three grew to
 # 43.1k — 72% of the budget — before the loader even reached the inboxes, so
 # every inbox file was ARITHMETICALLY guaranteed to be cut on every single
-# cycle: the heartbeat could not see Pascal's private mail or team inbox at
+# cycle: the heartbeat could not see the owner's private mail or team inbox at
 # all. A budget with unbounded members is not a budget.
 #
 # A cap trims a file's TAIL, so a capped file must be ordered
 # most-important-first. Both offenders violated that and were restructured the
 # same day: open_threads had 11 still-live items (4 of them blocking on
-# Pascal) appended UNDER its 「已归档」 heading, and todos kept its 已完成
+# owner blockers) appended UNDER its 「已归档」 heading, and todos kept its 已完成
 # section mid-file while the freshest auto-update entries sat at the very end,
 # i.e. exactly what a naive cap would have deleted first.
 _SYSTEM_FILE_DEFAULT_CAP = 2500
@@ -215,7 +215,7 @@ def load_tiered_memory(memory_dir: str | Path, purpose: str = "inbound",
     structured facts) always survives even when warm/ is over budget.
 
     purpose: "inbound" (default — full view, behavior unchanged) or
-    "outbound" — allowlisted context for tasks whose output leaves Pascal's
+    "outbound" — allowlisted context for tasks whose output leavesthe owner's
     world. Outbound tasks receive only hot/group_context.md, the same curated
     public context used in group chat. Todos, sessions, warm notes, timeline,
     mail, DMs and other private tiers are withheld by construction.
@@ -574,7 +574,7 @@ def _collect_system(memory_dir: Path, purpose: str) -> list[str]:
     (open_threads — drives heartbeat proactive follow-up per CLAUDE.md, todos,
     and pending_updates) come FIRST so that if the tier is ever
     truncated the casualties are the bulky perception buffers (inbox_ops /
-    inbox_private_mail), never Pascal's todos/threads. Previously plain
+    inbox_private_mail), never the owner's todos/threads. Previously plain
     alphabetical, so inbox_ops (21KB) ate the budget and dropped open_threads."""
     parts: list[str] = []
     sys_dir = memory_dir / "system"

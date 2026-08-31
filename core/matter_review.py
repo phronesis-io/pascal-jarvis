@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from core.timeutil import now_local
+from core.matter_prompts import continuation_prompt
 
 
 _TEXT_LIMITS = {
@@ -66,9 +67,7 @@ def _matter(row: Any) -> dict[str, Any]:
         if field in item:
             clean = " ".join(str(item.get(field) or "").split())
             item[field] = clean[:limit]
-    item["continuation_prompt"] = (
-        f"继续 Jarvis 事项「{item['title']}」（{item['id']}）"
-    )
+    item["continuation_prompt"] = continuation_prompt(item)
     return item
 
 
@@ -82,6 +81,7 @@ def build_matter_review(
     cutoff = current - timedelta(days=period_days)
     cutoff_text = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
     cutoff_epoch = cutoff.timestamp()
+    now_epoch = current.timestamp()
     db = _db()
 
     outcomes = [
@@ -144,7 +144,9 @@ def build_matter_review(
             """SELECT COUNT(*) FROM matter_runs r
                JOIN matters m ON m.id=r.matter_id
                WHERE m.status IN ('active','waiting','blocked')
-                 AND r.status IN ('acquired','running')"""
+                 AND r.status IN ('acquired','running')
+                 AND r.lease_expires_epoch > ?""",
+            (now_epoch,),
         ).fetchone()[0]
     )
     active_rows = db.execute(
@@ -154,6 +156,7 @@ def build_matter_review(
                     SELECT 1 FROM matter_runs r
                     WHERE r.matter_id=m.id
                       AND r.status IN ('acquired','running')
+                      AND r.lease_expires_epoch > ?
                   ) AS has_active_run
            FROM matters m
            WHERE m.status IN ('active','waiting','blocked')
@@ -163,7 +166,8 @@ def build_matter_review(
                       ELSE 2
                     END,
                     m.priority DESC,m.updated_at DESC
-           LIMIT 500"""
+           LIMIT 500""",
+        (now_epoch,),
     ).fetchall()
     active = [_matter(row) for row in active_rows]
 
@@ -220,8 +224,19 @@ def _line(item: dict[str, Any], detail: str) -> str:
 
 def render_matter_review(report: dict[str, Any], *, per_section: int = 3) -> str:
     """Render a compact Chinese review without turning it into another inbox."""
+    if not report.get("material"):
+        return ""
     cap = max(1, min(int(per_section), 5))
     sections: list[str] = []
+    summary = report.get("summary") or {}
+    needs_attention = sum(int(summary.get(key) or 0) for key in (
+        "awaiting_owner_closure", "attention", "next_actions",
+    ))
+    conclusion = (
+        f"这周有 {needs_attention} 件事值得你看，最重要的分别列在下面。"
+        if needs_attention
+        else "这周没有需要你接手的事，结果已经整理好，知道就行。"
+    )
 
     outcomes = report.get("outcomes") or []
     if outcomes:
@@ -256,7 +271,7 @@ def render_matter_review(report: dict[str, Any], *, per_section: int = 3) -> str
                  for item in next_actions[:cap]]
         sections.append("**接下来最值得推进**\n" + "\n".join(lines))
 
-    return "\n\n".join(sections)
+    return "\n\n".join([conclusion, *sections])
 
 
 def main(argv: list[str] | None = None) -> int:

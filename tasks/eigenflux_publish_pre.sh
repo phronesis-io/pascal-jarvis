@@ -91,7 +91,7 @@ for label, path in repos:
 
 if lines:
     print()
-    print('=== RECENT COMMITS (what Pascal has been building) ===')
+    print('=== RECENT COMMITS (what the owner has been building) ===')
     for l in lines[:15]:
         print(l)
 " 2>/dev/null)

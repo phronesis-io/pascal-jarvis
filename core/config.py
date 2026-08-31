@@ -71,6 +71,11 @@ _DEFAULTS = {
         "check_interval": 10,
         "tasks_file": "HEARTBEAT.md",
     },
+    "retained_rhythms": {
+        "checkin": False,
+        "daily_reflect": False,
+        "exercise_week": False,
+    },
     "schedule": {
         "working_hours": {"start": 9, "end": 22},
         "daily_plan_window": {"start": "08:00", "end": "09:30"},

@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.safety import atomic_write
+from core.model_usage import human_time, owner_route_label
 
 
 def _state_path() -> Path:
@@ -37,14 +38,18 @@ def _write_state(path: Path, payload: dict) -> None:
 def _issue_key(item: dict) -> str:
     code = str(item.get("code") or "")
     category = "codex_quota_risk" if code.startswith("codex_") else code
-    reset = str(item.get("resets_at") or "") if category == "codex_quota_risk" else ""
     return (
         f"{category}:{item.get('route_id', '')}:"
-        f"{item.get('limit_id', '')}:{item.get('window_name', '')}:{reset}"
+        f"{item.get('limit_id', '')}:{item.get('window_name', '')}"
     )
 
 
 def render_usage_alert(report: dict, *, state_path: Path) -> str:
+    # Unknown is not recovery. Preserve the current episode when the exact
+    # package surface cannot be read, otherwise every transient read failure
+    # clears and re-arms the same alert.
+    if str((report.get("codex") or {}).get("error") or ""):
+        return ""
     issues = [item for item in report.get("issues", []) if isinstance(item, dict)]
     keyed = {_issue_key(item): item for item in issues}
     current_keys = set(keyed)
@@ -69,23 +74,41 @@ def render_usage_alert(report: dict, *, state_path: Path) -> str:
         "TITLE: 模型额度需要留意",
         "WORKED: 已读取真实套餐窗口并核对当前备用链路",
     ]
+    issue_lines: list[str] = []
+    route_labels = {
+        str(item.get("id") or ""): str(
+            item.get("owner_label")
+            or owner_route_label(item.get("id"), item.get("label"))
+        )
+        for item in report.get("routes", []) if isinstance(item, dict)
+    }
     for item in [keyed[key] for key in sorted(new_keys)][:4]:
         if item.get("code", "").startswith("codex_"):
             prediction = item.get("predicted_exhaustion_at")
-            timing = f"，按当前速度预计 {prediction} 用尽" if prediction else ""
+            timing = (
+                f"，按当前速度预计 {human_time(prediction)} 用尽"
+                if human_time(prediction) else ""
+            )
             used = float(item.get("used_percent") or 0)
-            lines.append(
+            issue_lines.append(
                 f"Codex {item.get('window_label') or item.get('window_name', '')}"
                 f"额度已用 {used:g}%，还剩约 {max(0.0, 100.0 - used):g}%；"
-                f"{item.get('resets_at', '重置时间未知')} 重置{timing}。"
+                f"{human_time(item.get('resets_at')) or '重置时间未知'} 重置{timing}。"
             )
         else:
-            lines.append(f"{item.get('route_id', '模型通道')} 已遇到账户额度限制。")
-    order = report.get("fallback_order") or []
+            route_id = str(item.get("route_id") or "")
+            issue_lines.append(
+                f"{route_labels.get(route_id) or owner_route_label(route_id)} 已遇到账户额度限制。"
+            )
+    lines.append(" ".join(issue_lines[:3]))
+    order = report.get("fallback_labels") or [
+        route_labels.get(str(route_id)) or owner_route_label(route_id)
+        for route_id in report.get("fallback_order", [])
+    ]
     lines.append(
-        "当前可尝试顺序：" + (" -> ".join(order) if order else "没有可执行通道")
+        "当前可尝试顺序：" + ("、".join(order) if order else "没有可执行通道")
     )
-    lines.append("无需现在打开网页；重置或链路变化后系统会继续刷新。")
+    lines.append("你不用现在打开网页；重置或链路变化后我再更新。")
     return "\n".join(lines)
 
 

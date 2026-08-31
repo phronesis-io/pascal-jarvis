@@ -2,7 +2,7 @@
 """Post-hook for eigenflux-messages: send replies back to EigenFlux.
 
 Stdin: Claude's response (JSON with reply_actions and user_message).
-Stdout: user_message (forwarded to Pascal via Lark) or empty if nothing to send.
+Stdout: user_message (forwarded to the owner via Lark) or empty if nothing to send.
 """
 
 import subprocess
@@ -21,7 +21,7 @@ def _auto_reply_pm_enabled() -> bool:
     `false` suppresses auto-reply; unset/unknown/`true` all default to ON.
 
     This is the single choke point where Jarvis replies to a PM *sender* (the
-    real-time stream path only surfaces messages to Pascal), so gating here is
+    real-time stream path only surfaces messages to the owner), so gating here is
     sufficient to make the whole bot honor the switch.
     """
     try:
@@ -55,7 +55,7 @@ def main() -> int:
     user_message = data.get("user_message", "")
 
     # Honor the auto_reply_pm switch: when off, do NOT reply to the sender —
-    # surface to Pascal and let him decide. Annotate so he knows replies were held.
+    # surface to the owner and let him decide. Annotate so he knows replies were held.
     if reply_actions and not _auto_reply_pm_enabled():
         held = len(reply_actions)
         reply_actions = []

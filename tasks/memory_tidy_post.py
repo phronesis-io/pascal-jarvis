@@ -38,7 +38,7 @@ INDEX_FILE = _index_file(MEMORY_DIR)
 STRAY_WARM_DIR = JARVIS_DIR / "warm"
 
 # Dual-directory paths for one-way sync (auto → heartbeat). CLAUDE.md
-# source-of-truth rule: warm/ 用户画像以 auto-memory 为准; the heartbeat copy
+# source-of-truth rule: warm/用户画像以 auto-memory 为准; the heartbeat copy
 # is a read-only replica that only this sync may write. Single home of the
 # hardcoded pair — memory_consolidate_post imports it to reroute its warm/
 # directives to canon instead of writing the replica (2026-07-08 memory audit).
@@ -197,7 +197,7 @@ def _mirror_warm_deletions():
     红队修正：'absent from auto warm/' is NOT deletion evidence — 8 replica-
     only files turned out to be LIVE profile docs written directly by
     heartbeat sessions whose canon never existed in auto warm/ (health,
-    energy, portfolio…); archiving them would have evicted the owner's
+    energy, portfolio…); archiving them would have evictedthe owner's
     profile from every prompt. Only a copy in auto warm/archive/ proves the
     auto side deliberately demoted/retired the file — that's the gate.
     Replica-only files with no such evidence are left alone. Move (never

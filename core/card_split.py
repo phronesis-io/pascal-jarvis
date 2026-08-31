@@ -1,6 +1,6 @@
 """Mechanical one-card-one-matter splitting (一张卡一件事, REQ-117).
 
-Pascal's 7/10 decree: a memorial card states ONE matter. The 7/15 fix
+the owner's 7/10 decree: a memorial card states ONE matter. The 7/15 fix
 (458ce63) was a prompt-level contract for LLM-authored digests — it cannot
 reach mechanically composed bodies, and on 7/21 the calendar 日程变动 card
 merged three 改期 lines into one card again. This module is the code-level
@@ -55,9 +55,9 @@ _GENERIC_SECTION_WORDS = {
 MAX_SPLIT_CARDS = 6
 
 # A change list stops being "one matter each" once it is long enough to read
-# as a batch. Pascal, 2026-07-21: three shifted meetings should be three
-# cards. Pascal, 2026-08-07 (after 9 日程变动 cards in 24h, 4 taps total):
-# "有些可以合并的可以". Both hold at once — split a short list, merge a long
+# as a batch. Owner feedback established both sides: three shifted meetings
+# should be separate cards, while a long change list should be merged. Both
+# hold at once — split a short list, merge a long
 # one, because a long one IS one matter ("your calendar moved a lot today").
 MERGE_CHANGE_LIST_ABOVE = 3
 

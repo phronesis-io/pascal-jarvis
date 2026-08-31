@@ -1,6 +1,6 @@
 ---
 name: jarvis-matter
-description: Continue durable work across Codex tasks, devices, Lark, Claude Code, or time by binding the current outcome to a Jarvis Matter. Use for multi-session work, tracked commitments, handoffs, or verified external effects; do not use for ordinary one-turn questions.
+description: Use when the owner asks how Codex and Jarvis divide work, what needs attention, what was decided, which model or quota is active, or when durable work must continue across Codex tasks, devices, Lark, Claude Code, or time. Bind multi-session outcomes, commitments, handoffs, and verified external effects to one Matter; do not create a Matter for ordinary one-turn work.
 ---
 
 # Jarvis Matter
@@ -9,12 +9,33 @@ Codex is the interactive frontstage. Jarvis is the durable backstage. Keep the
 conversation and execution in Codex; use Jarvis only for continuity that must
 survive this task.
 
+## Daily Default
+
+- The owner starts questions, research, writing, coding, file work, and long
+  review in a normal Codex task on desktop or mobile.
+- Git and GitHub remain authoritative for source, diffs, commits, PRs, CI, and
+  merge. Link only the evidence a durable outcome needs.
+- Jarvis works backstage. It talks first only for a deadline, material external
+  change, explicitly entrusted result, retained companion rhythm, or a
+  judgment/authority boundary reached after it completed the reversible work.
+- Lark is a bounded wake-up and native communication/calendar/document surface,
+  not the place for long work.
+- A quiet Jarvis is healthy when no result is owed. Never create activity or a
+  Matter merely to prove presence.
+
+When the owner asks how to use the system or when Jarvis is needed, call
+`jarvis_operating_model` and explain that stable contract in natural language
+before exposing tools or identifiers. When he asks what deserves his attention,
+use `jarvis_matter_review`; do not summarize Agent activity. When he asks about
+a prior decision, use compiled memory search. When he asks about model identity,
+quota, reset, or fallback, use `jarvis_model_status`.
+
 ## Decide
 
 A Matter is warranted when at least one is true:
 
 - the work will continue in another task, device, product, or day;
-- Pascal made a commitment or expects a later follow-up;
+- the owner made a commitment or expects a later follow-up;
 - the work has external effects that need durable evidence;
 - several artifacts or executors belong to one recognizable outcome.
 
@@ -23,6 +44,12 @@ task that can finish and be verified entirely in the current Codex task.
 
 ## Work
 
+0. A task may have been prepared by a Jarvis wake receipt. Preparation is not
+   execution: wait for the owner's first message. When he asks to continue, use
+   the exact Matter ID and wake ID from the trusted task instruction and call
+   `jarvis_matter_continue` with both; omit `task_ref` because Jarvis resolves
+   the real Codex thread from the wake receipt. Never treat task creation as
+   acquire, progress, or completion evidence.
 1. The user speaks naturally; do not teach or expose the Matter protocol. When
    the request clearly continues durable work, call `jarvis_matter_continue`
    with a concise identifying phrase. If it returns one match, proceed. If it
@@ -38,35 +65,35 @@ task that can finish and be verified entirely in the current Codex task.
 5. Release exactly once. List only files inside the workspace that now exist
    or are verifiably deleted. External effects need Delegation evidence IDs.
 6. If execution cannot finish, abort the run so the next task is not blocked.
-7. When Pascal explicitly says the named Matter is complete, release any live
+7. When the owner explicitly says the named Matter is complete, release any live
    run first, then call `jarvis_matter_close` with the useful outcome and his
    exact confirmation words. This one transition retires linked reminders,
    Items, and Handoffs. A live run, Job, or Delegation remains a blocker.
 8. After a substantive desktop/mobile run releases successfully, call
    `jarvis_acceptance_prompt` once. Only when it returns `should_ask=true`, add
-   its single short question after the result. The claim is durable: if Pascal
+   its single short question after the result. The claim is durable: if the owner
    ignores it, never ask again for that run. Do not ask for failed runs,
    ordinary one-turn work, or after that surface reaches its sample target.
-9. If Pascal's next reply is exactly `顺`, or one or more of `找错事项`,
+9. If the owner's next reply is exactly `顺`, or one or more of `找错事项`,
    `背景不对`, `没做完`, `有重复动作`, `需要重讲`, call
    `jarvis_acceptance_record` with his exact text. Do not accept prose, infer a
    label, turn praise into approval, or self-review the run.
 
 ## Remember
 
-- Search compiled memory when Pascal refers to a settled decision, preference,
+- Search compiled memory when the owner refers to a settled decision, preference,
   commitment, or fact from another Codex task, Claude Code session, or Lark.
 - Active compiled claims may enter a Context Packet. Raw transcripts and
   assistant-only candidates may not.
 - Each claim must retain source references. Follow the raw source only for an
-  explicit audit or when Pascal asks to inspect the original conversation.
-- Use memory review only after Pascal explicitly confirms, chooses, or rejects
+  explicit audit or when the owner asks to inspect the original conversation.
+- Use memory review only after the owner explicitly confirms, chooses, or rejects
   the named claim in the current conversation. Never infer consent, self-review
   a claim, or invent a reviewer identity.
 
 ## Model Status
 
-- Use `jarvis_model_status` when Pascal asks which model is active, how much
+- Use `jarvis_model_status` when the owner asks which model is active, how much
   package usage remains, when it resets, or whether fallback is usable.
 - Treat only `quota_evidence=exact` windows as numeric allowance. Account
   login, a configured token, and a green canary do not prove remaining quota.
@@ -75,7 +102,7 @@ task that can finish and be verified entirely in the current Codex task.
 
 ## Review
 
-- Use `jarvis_matter_review` when Pascal asks what was actually accomplished,
+- Use `jarvis_matter_review` when the owner asks what was actually accomplished,
   what is awaiting his closure, or what is most useful to continue next.
 - Organize the answer by Matter outcomes and next actions, never by Agent
   activity, commit count, token volume, or raw task history.
@@ -87,7 +114,7 @@ task that can finish and be verified entirely in the current Codex task.
 - A Result Receipt closes the execution window, not the Matter.
 - Do not claim an external action from prose, tool intent, or an unverified
   response.
-- Do not infer Matter completion. Pascal may explicitly close it; Jarvis then
+- Do not infer Matter completion. the owner may explicitly close it; Jarvis then
   reconciles linked state and records an authoritative closure receipt.
 - A new Codex task is the normal boundary for a distinct outcome. Multiple
   tasks may contribute to one Matter, one run at a time.

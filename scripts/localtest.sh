@@ -42,8 +42,20 @@ fi
 if [ "$runtime" -eq 0 ]; then
   echo "[localtest] maintainability debt budget"
   python3 scripts/maintainability_budget.py
-  echo "[localtest] pytest"
-  python3 -m pytest tests/ "$@"
+  if [ "$#" -gt 0 ]; then
+    echo "[localtest] focused pytest (coverage budget belongs to the full gate)"
+    python3 -m pytest "$@"
+  else
+    coverage_dir="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-coverage.XXXXXX")"
+    trap 'rm -rf "$coverage_dir"' EXIT
+    export COVERAGE_FILE="$coverage_dir/jarvis-coverage"
+    echo "[localtest] full pytest with branch coverage"
+    python3 -m coverage run -m pytest tests/
+    python3 -m coverage combine
+    python3 -m coverage json -o "$coverage_dir/coverage.json"
+    echo "[localtest] coverage budget"
+    python3 scripts/coverage_budget.py "$coverage_dir/coverage.json"
+  fi
 else
   # A live heartbeat legitimately updates repository runtime state while the
   # strict pytest guard requires those same paths to stay byte-for-byte still.

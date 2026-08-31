@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Legacy EigenFlux quiet-hours backlog compatibility helpers.
 
-Pascal asked (2026-06-07, ~00:08): stop pinging me with EigenFlux feed / 知会
+the owner asked (2026-06-07, ~00:08): stop pinging me with EigenFlux feed / 知会
 at night. Hold them, and give me ONE consolidated card in the morning at a
 good time — not a one-by-one drip at midnight, and not a giant dump either.
 Only genuinely urgent items break through at night.

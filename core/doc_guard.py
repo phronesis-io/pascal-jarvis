@@ -1,9 +1,9 @@
 """Protected-document write guard (REQ-65) — deterministic, read-back based.
 
 The single highest trust risk in the interaction audit: Jarvis reported precise
-FAKE success on Pascal's most-valued artifacts — '<latex> 16→56, 改好了 ✅' on a
+FAKE success onthe owner's most-valued artifacts — '<latex> 16→56, 改好了 ✅' on a
 whitepaper that ended up with ZERO formulas (revision 798→799 self-refuted), and
-a travel-handbook "rebuild" that wiped Pascal's hand-entered parking points and
+a travel-handbook "rebuild" that wiped the owner's hand-entered parking points and
 point-to-point drive times. The v2 闸2 maker-verifier was fooled because it
 counted its OWN generation-side output, not an independent read-back of the live
 doc.
@@ -16,7 +16,7 @@ write succeeded (behavioral_rules mandates it):
   - diff_blocks(): block-level before/after diff — how many blocks were deleted
     vs added. A "patch" that deletes most of the doc is a destructive overwrite.
   - verify_write(): combine both into a verdict the agent acts on — OK, or
-    FAILED with a reason to surface to Pascal ("I didn't manage to change it")
+    FAILED with a reason to surface to the owner ("I didn't manage to change it")
     instead of a fake ✅.
 
 All functions are pure (text in, verdict out) so they are fully testable and the
@@ -31,7 +31,7 @@ import sys
 
 # A write that removes more than this fraction of the pre-existing blocks is
 # treated as a destructive overwrite, not a patch — reject unless explicitly
-# confirmed. Pascal's handbook lost hand-entered data to exactly this.
+# confirmed. the owner's handbook lost hand-entered data to exactly this.
 MAX_BLOCK_DELETION_RATIO = 0.30
 
 
@@ -67,7 +67,7 @@ def diff_blocks(before: str, after: str) -> dict:
 
     Counts blocks WITH MULTIPLICITY (red-team fix): a set-based diff collapsed
     N identical lines to one, so wiping 30 identical table rows (parking
-    points / drive-time rows in Pascal's handbook) counted as deleting ONE
+    points / drive-time rows in the owner's handbook) counted as deleting ONE
     block — deletion_ratio 0.024, sailed through as "safe", re-opening the
     exact destructive-overwrite this module exists to catch."""
     from collections import Counter

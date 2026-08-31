@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -473,6 +474,40 @@ def test_explicit_recovery_releases_every_stale_owner(tmp_path):
     assert recover_expired_runs(now=132.0) == []
 
 
+def test_independent_lease_connection_can_race_abort_without_transaction_error(
+    tmp_path,
+):
+    from core.db import independent_connection
+
+    run, _bundle = _bound_run(tmp_path, now=100.0)
+    errors = []
+    started = threading.Event()
+
+    def renew_many():
+        with independent_connection() as connection:
+            started.set()
+            for _ in range(1000):
+                try:
+                    renew_run(
+                        run["id"], lease_seconds=300, now=102.0,
+                        connection=connection,
+                    )
+                except MatterRunConflict:
+                    continue
+                except Exception as exc:  # pragma: no cover - assertion below
+                    errors.append(exc)
+
+    worker = threading.Thread(target=renew_many)
+    worker.start()
+    assert started.wait(timeout=2)
+    abort_run(run["id"], error="owner stopped execution", now=103.0)
+    worker.join(timeout=10)
+
+    assert worker.is_alive() is False
+    assert errors == []
+    assert get_run(run["id"])["status"] == "failed"
+
+
 def test_receipt_projection_failure_is_visible_but_does_not_erase_receipt(tmp_path):
     from core.matters import link_entity
 
@@ -519,3 +554,55 @@ def test_audit_event_projection_failure_never_rolls_back_the_lease(
 
     assert get_run(run["id"])["status"] == "acquired"
     assert "run_event_projection_failed" in capsys.readouterr().err
+
+
+def test_receipt_projection_still_links_session_when_matter_snapshot_is_missing(
+    tmp_path, monkeypatch,
+):
+    from core import matter_run_projection
+
+    links = []
+    events = []
+    monkeypatch.setattr(matter_run_projection, "get_matter", lambda _mid: None)
+    monkeypatch.setattr(
+        matter_run_projection,
+        "link_entity",
+        lambda *args, **kwargs: links.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        matter_run_projection,
+        "project_event",
+        lambda *args, **kwargs: events.append((args, kwargs)) or True,
+    )
+    run = {
+        "id": "run_missing_snapshot",
+        "matter_id": "matter_missing_snapshot",
+        "session_id": "session-1",
+        "executor": "codex",
+        "run_sequence": 3,
+        "workspace": str(tmp_path),
+        "model": "gpt-test",
+    }
+
+    matter_run_projection.project_receipt(
+        run=run,
+        receipt={
+            "receipt_id": "receipt-1",
+            "digest": "sha256:receipt",
+            "execution": {"exit_code": 0},
+        },
+        artifacts=[],
+        effects=[],
+        final_status="released",
+    )
+
+    assert links[0][0][:3] == (
+        "matter_missing_snapshot", "session", "session-1",
+    )
+    assert links[0][1]["title"] == "codex run 3"
+    assert links[0][1]["metadata"] == {
+        "workspace": str(tmp_path),
+        "model": "gpt-test",
+        "status": "released",
+    }
+    assert events[0][0][1] == "matter_run_released"

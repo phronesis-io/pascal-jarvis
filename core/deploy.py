@@ -430,12 +430,10 @@ def smoke_delivery(
     ))
     elapsed = time.monotonic() - started
     ok = result.state in {"delivered", "read", "acted"} and elapsed <= timeout
-    if ok:
-        pipeline.confirm(result.delivery_id, "acted")
     return {
         "ok": ok,
         "delivery_id": result.delivery_id,
-        "state": "acted" if ok else result.state,
+        "state": result.state,
         "channel": result.channel,
         "elapsed_seconds": round(elapsed, 4),
         "timeout_seconds": float(timeout),
@@ -462,7 +460,8 @@ def _receipt_gate(gate: dict) -> dict:
         key: gate[key]
         for key in (
             "ok", "repo", "sha", "pr_head_sha", "pr", "required_checks",
-            "approval_mode", "branch_protection",
+            "approval_mode", "branch_protection", "evidence_source", "stale",
+            "live_verified_epoch", "cache_age_seconds",
         )
         if key in gate
     } | {

@@ -57,7 +57,7 @@ if [ "$ok" != "true" ]; then
   exit 0
 fi
 
-# Filter: remove Pascal's own messages, extract useful fields
+# Filter: remove the owner's own messages, extract useful fields
 messages=$(echo "$result" | jq -r --arg pid "$PASCAL_ID" '
   .data.messages // []
   | map(select(.sender.id != $pid and .deleted == false))

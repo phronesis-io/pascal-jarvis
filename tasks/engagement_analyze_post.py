@@ -203,7 +203,7 @@ def _apply_adaptations(adaptations: list[dict]):
 
         # Direction: the structured field is AUTHORITATIVE when present (the
         # analyzer's JSON contract carries "direction" since 2026-06-12 —
-        # Pascal's 去关键词化 ask). A present-but-unrecognized value must
+        #the owner's 去关键词化 ask). A present-but-unrecognized value must
         # SKIP, never fall through to prose keywords: the rationale text can
         # contain words like "more relevant" and apply the OPPOSITE change.
         # Keyword parsing of the prose runs ONLY when direction is absent

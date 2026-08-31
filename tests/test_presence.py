@@ -1,9 +1,9 @@
-"""Presence floor + morning archive digest.
+"""Delivery debt + morning archive digest.
 
 Owner (2026-08-07): 「飞书里面没有卡片了，jarvis 就没有存在感」. The 7/24
 cliff ran ten days green because cards were delivered to surfaces with zero
-traffic. These tests pin the two defenses: the floor sentinel pages, and
-archive-only cards get one batched shot in the morning anchor.
+traffic. The current defense follows promised messages, not a volume floor;
+archive-only cards still get one batched shot in the morning anchor.
 """
 
 from __future__ import annotations
@@ -49,14 +49,13 @@ def _ledger_only(i, ts="2026-08-07 09:01"):
             "status": "ledger_only"}
 
 
-def test_floor_pages_when_feishu_goes_quiet(tmp_path):
-    """The cliff signature: cards created all day, almost none reach Feishu."""
+def test_low_message_volume_is_not_itself_an_outage(tmp_path):
     events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
     _write_ledger(tmp_path, events)
-    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+    assert presence.check(now=NOW) == ""
 
 
-def test_floor_quiet_on_a_healthy_day(tmp_path):
+def test_presence_quiet_on_a_healthy_day(tmp_path):
     events = []
     for i in range(10):
         events += [_created(i), _sent(i)]
@@ -114,8 +113,7 @@ def test_sent_count_uses_delivery_receipts_and_excludes_non_cards(
     assert presence.sent_count(now=NOW) == 8
 
 
-def test_floor_uses_delivery_db_without_memorial_ledger(tmp_path, monkeypatch):
-    """Direct heartbeat cards can exist before any memorial is written."""
+def test_two_delivered_cards_can_be_a_healthy_day(tmp_path, monkeypatch):
     from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
 
     now = NOW.replace(tzinfo=__import__(
@@ -141,25 +139,49 @@ def test_floor_uses_delivery_db_without_memorial_ledger(tmp_path, monkeypatch):
         )).state == "delivered"
 
     assert not (tmp_path / "memorials.jsonl").exists()
-    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+    assert presence.check(now=NOW) == ""
 
 
-def test_floor_ignores_stale_sends_outside_the_window(tmp_path):
-    """Ten sends last week must not mask a silent today."""
+def test_stale_sends_do_not_create_delivery_debt(tmp_path):
     events = [_sent(i, ts="2026-07-30 09:00") for i in range(10)]
     _write_ledger(tmp_path, events)
-    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+    assert presence.check(now=NOW) == ""
 
 
 def test_fresh_install_without_ledger_is_not_an_outage(tmp_path):
     assert presence.check(now=NOW) == ""
 
 
-def test_warning_text_is_stable_for_alert_dedup():
-    """selfmon dedups by line content — a count in the text would re-page
-    every 4h for one persisting condition."""
-    assert not any(ch.isdigit() and ch != "5" and ch != "2" and ch != "4"
-                   for ch in presence.FLOOR_WARNING.replace("7/24", ""))
+def test_failed_delivery_creates_debt_warning(tmp_path, monkeypatch):
+    from core.delivery import DeliveryEnvelope, DeliveryPipeline, TransportResult
+
+    now = NOW.replace(tzinfo=__import__(
+        "core.timeutil", fromlist=["now_local"]).now_local().tzinfo).timestamp()
+    db_path = tmp_path / "data" / "jarvis.db"
+    monkeypatch.setenv("JARVIS_DB_PATH", str(db_path))
+    pipe = DeliveryPipeline(
+        tmp_path, db_path=db_path,
+        transport=lambda _envelope, _channel: TransportResult(
+            False, error="offline"),
+        clock=lambda: now, sleeper=lambda _: None,
+    )
+    result = pipe.deliver(DeliveryEnvelope(
+        source="mail", kind="card", attention="alert",
+        payload={"card_json": json.dumps({
+            "elements": [{"tag": "markdown", "content": "到期邮件"}],
+        })},
+        metadata={"bypass_throttle": True},
+    ))
+
+    assert result.state == "queued"
+    import sqlite3
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "UPDATE delivery_envelopes SET state='failed' WHERE id=?",
+            (result.delivery_id,),
+        )
+    assert presence.delivery_debt_count(now=NOW) == 1
+    assert presence.check(now=NOW) == presence.DELIVERY_DEBT_WARNING
 
 
 def test_digest_batches_ledger_only_cards(tmp_path):
@@ -299,12 +321,7 @@ def test_morning_anchor_fresh_line_is_sent_and_remembered(monkeypatch, capsys):
     assert remembered == ["早。今天的锚点：死活题。"]
 
 
-# ── absence: a shut lid reads exactly like a broken pipe ─────────────
-#
-# 2026-08-18/19 the MacBook was closed for ~39h. Card output fell 76/day → 2,
-# so the floor sentinel fired — pointing at the delivery chain, which was
-# healthy. Meanwhile nothing anywhere told Pascal he had been offline for a
-# day and a half; he found out because the cards thinned out.
+# ── absence: quiet volume is not delivery debt ──────────────────────
 
 
 def _sleep_gaps(tmp_path, *durations_s, ts="2026-08-07 03:00"):
@@ -315,25 +332,20 @@ def _sleep_gaps(tmp_path, *durations_s, ts="2026-08-07 03:00"):
     (tmp_path / "sched_events.jsonl").write_text(lines + "\n", encoding="utf-8")
 
 
-def test_quiet_because_the_host_slept_does_not_blame_delivery(tmp_path):
+def test_sleep_with_no_owed_message_is_quiet(tmp_path):
     events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
     _write_ledger(tmp_path, events)
     _sleep_gaps(tmp_path, 4181, 5481, 4286, 4568, 3674)   # 8/18, ~6h of it
 
-    line = presence.check(now=NOW)
-
-    assert line == presence.ABSENCE_WARNING
-    assert line != presence.FLOOR_WARNING
-    assert "投递" in line          # names the thing it is ruling OUT
+    assert presence.check(now=NOW) == ""
 
 
-def test_quiet_on_an_awake_host_still_blames_delivery(tmp_path):
-    """The 7/24 cliff must keep firing — that outage had no host sleep."""
+def test_awake_host_with_no_owed_message_is_also_quiet(tmp_path):
     events = [_created(i) for i in range(20)] + [_sent(0), _sent(1)]
     _write_ledger(tmp_path, events)
     _sleep_gaps(tmp_path, 300)     # one nap, nowhere near the threshold
 
-    assert presence.check(now=NOW) == presence.FLOOR_WARNING
+    assert presence.check(now=NOW) == ""
 
 
 def test_a_healthy_day_is_silent_even_after_a_nap(tmp_path):

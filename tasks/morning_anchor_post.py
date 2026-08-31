@@ -4,7 +4,7 @@
 Stamps data/morning_anchor_state.json BEFORE emitting the card, so even if
 two cycles raced through the pre-gate the second one dies here (at most once
 per day, the stamp is the source of truth). No follow-up mechanism exists on
-purpose: ignored = ignored (Pascal hates nagging).
+purpose: ignored = ignored (the owner hates nagging).
 """
 
 import sys

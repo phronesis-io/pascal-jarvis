@@ -173,6 +173,12 @@ def _existing_memorial(states: list[dict], message: dict) -> dict | None:
             context = json.loads(str(state.get("context") or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
             context = {}
+        external_ids = {
+            str(value) for value in context.get("external_event_ids", [])
+            if str(value or "")
+        }
+        if message["msg_id"] in external_ids:
+            return state
         if conv_id and str(context.get("conv_id") or "") != conv_id:
             continue
         if sender_id and str(context.get("sender_id") or "") != sender_id:

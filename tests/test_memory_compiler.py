@@ -19,6 +19,7 @@ from core.memory_compiler import (
     compiler_status,
     open_conflicts,
     prepare_batch,
+    record_compile_failure,
     resolve_claim,
     search_compiled_memory,
 )
@@ -80,6 +81,10 @@ def _sources(tmp_path: Path, *, linked: bool = True):
         link_entity(
             matter["id"], "session", "codex-human", provider="codex",
             title="Codex task",
+        )
+        link_entity(
+            matter["id"], "session", "claude-human", provider="claude",
+            title="Claude task",
         )
     record_turn(
         "owner", "user", "飞书只负责紧急唤醒", message_id="om_owner",
@@ -165,13 +170,24 @@ def test_codex_claude_and_owner_lark_compile_without_group_leak(tmp_path):
     assert "所有上线工作已经完成" not in rendered
 
 
-def test_owner_lark_assistant_turn_is_candidate_not_active():
+def test_unbound_owner_lark_assistant_turn_is_not_compiled():
     record_turn(
         "owner", "assistant", "日历已经全部更新完成",
         message_id="om_lark_assistant", provider="Claude primary",
         memory_eligible=True,
     )
+    assert prepare_batch(batch_size=20) is None
+
+
+def test_matter_bound_owner_lark_assistant_turn_is_candidate_not_active():
+    matter = create_matter("日历核验")
+    record_turn(
+        "owner", "assistant", "日历已经全部更新完成",
+        message_id="om_lark_assistant", provider="Claude primary",
+        matter_id=matter["id"], memory_eligible=True,
+    )
     batch = prepare_batch(batch_size=20)
+    assert batch is not None
     source = next(
         item for item in batch["sources"]
         if item["text"] == "日历已经全部更新完成"
@@ -188,6 +204,37 @@ def test_owner_lark_assistant_turn_is_candidate_not_active():
     )
     assert claim["status"] == "candidate"
     assert "日历已经全部更新完成" not in compiled_context()
+
+
+def test_unbound_session_assistant_turn_does_not_consume_compile_quota(tmp_path):
+    _matter, index_db = _sources(tmp_path, linked=False)
+
+    batch = prepare_batch(index_db=index_db, batch_size=20)
+
+    assert batch is not None
+    texts = {item["text"] for item in batch["sources"]}
+    assert "所有上线工作已经完成" not in texts
+    assert "我决定默认在 Codex 开始长任务" in texts
+
+
+def test_unbound_assistant_flood_never_displaces_owner_turns():
+    for index in range(100):
+        record_turn(
+            "owner", "assistant", f"助手推断 {index}",
+            message_id=f"om_assistant_{index}", memory_eligible=True,
+        )
+    for index in range(5):
+        record_turn(
+            "owner", "user", f"用户原话 {index}",
+            message_id=f"om_user_{index}", memory_eligible=True,
+        )
+
+    batch = prepare_batch(batch_size=64)
+
+    assert batch is not None
+    assert [item["text"] for item in batch["sources"]] == [
+        f"用户原话 {index}" for index in range(5)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -526,23 +573,37 @@ def test_prepare_repairs_legacy_ack_conflict_and_restores_grounded_fact():
     assert conflict["resolution"] == "context_dependent_owner_quote"
 
 
-def test_model_cannot_fabricate_a_quote_or_omit_a_source(tmp_path):
+def test_bad_quote_is_dropped_without_poisoning_grounded_claims(tmp_path):
     _, index_db = _sources(tmp_path)
     batch = prepare_batch(index_db=index_db, batch_size=20)
-    source = batch["sources"][0]
-    with pytest.raises(MemoryCompilerError, match="not grounded"):
-        apply_compile_result({
-            "schema": "jarvis.memory-candidates.v1",
-            "batch_id": batch["batch_id"],
-            "claims": [_claim(
-                source, kind="fact", key="fabricated", content="假的",
+    bad_source, good_source = batch["sources"][:2]
+    receipt = apply_compile_result({
+        "schema": "jarvis.memory-candidates.v1",
+        "batch_id": batch["batch_id"],
+        "claims": [
+            _claim(
+                bad_source, kind="fact", key="fabricated", content="假的",
                 quote="原文中不存在的句子",
-            )],
-            "ignored_source_refs": [
-                item["source_ref"] for item in batch["sources"][1:]
-            ],
-        })
-    assert prepare_batch(index_db=index_db)["batch_id"] == batch["batch_id"]
+            ),
+            _claim(
+                good_source, kind="fact", key="grounded",
+                content=good_source["text"],
+            ),
+        ],
+        "ignored_source_refs": [
+            item["source_ref"] for item in batch["sources"][2:]
+        ],
+    })
+
+    assert receipt["claim_count"] == 1
+    assert receipt["rejected_claim_count"] == 1
+    assert receipt["rejected_claims"][0]["source_ref"] == bad_source["source_ref"]
+    assert compiler_status()["pending_batches"] == 0
+
+
+def test_omitted_source_keeps_batch_retryable(tmp_path):
+    _, index_db = _sources(tmp_path)
+    batch = prepare_batch(index_db=index_db, batch_size=20)
 
     with pytest.raises(MemoryCompilerError, match="omitted sources"):
         apply_compile_result({
@@ -552,6 +613,35 @@ def test_model_cannot_fabricate_a_quote_or_omit_a_source(tmp_path):
             "ignored_source_refs": [],
         })
     assert compiler_status()["pending_batches"] == 1
+
+
+def test_three_recorded_failures_release_poison_batch_for_new_work():
+    first, _ = _one_lark_batch("第一条坏批次来源")
+    for attempt in range(1, 4):
+        receipt = record_compile_failure("bad envelope", now=100.0 + attempt)
+        assert receipt["attempts"] == attempt
+        assert receipt["terminal"] is (attempt == 3)
+
+    connection = db_module.get_db()
+    batch_row = connection.execute(
+        "SELECT status,attempts,payload,last_error FROM memory_compile_batches "
+        "WHERE id=?", (first["batch_id"],),
+    ).fetchone()
+    assert dict(batch_row) == {
+        "status": "failed",
+        "attempts": 3,
+        "payload": "{}",
+        "last_error": "bad envelope",
+    }
+    source_row = connection.execute(
+        "SELECT status FROM memory_compile_sources WHERE batch_id=?",
+        (first["batch_id"],),
+    ).fetchone()
+    assert source_row["status"] == "ignored"
+
+    second, second_source = _one_lark_batch("第二条可以继续处理")
+    assert second["batch_id"] != first["batch_id"]
+    assert second_source["text"] == "第二条可以继续处理"
 
 
 def _one_lark_batch(text: str, *, matter_id: str = "") -> tuple[dict, dict]:

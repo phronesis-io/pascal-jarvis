@@ -8,7 +8,9 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -152,6 +154,28 @@ exec "$REAL_PYTHON" "$@"
         encoding="utf-8",
     )
     path.chmod(0o755)
+
+
+def _start_fake_openai() -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            body = json.dumps({
+                "output_text": "已由最终 GPT 备用通道接管",
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def _write_crashing_command_python(path: Path) -> None:
@@ -347,11 +371,12 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
         "process_actions(){ printf '%s' \"$1\"; }\n"
         "resolve_memorial_thread_after_reply(){ :; }\n"
         + _bot_function("looks_like_error")
-        + _bot_function("delivery_reply_reliable")
-        + _bot_function("run_codex_locked")
-        + _bot_function("with_primary_model_credential")
-        + _bot_function("with_openai_credential")
-        + _bot_function("handle_message")
+            + _bot_function("delivery_reply_reliable")
+            + _bot_function("with_primary_model_credential")
+            + _bot_function("with_openai_credential")
+            + _bot_function("exec_model_worker")
+            + _bot_function("exec_owner_model_worker")
+            + _bot_function("handle_message")
         + "handle_message \"$@\"\nwait\n",
         encoding="utf-8",
     )
@@ -469,8 +494,8 @@ def test_production_handler_weekly_limit_routes_codex_and_records_continuity(
     assert claude_log.read_text(encoding="utf-8").splitlines() == ["called"]
     assert prompt_log.read_text(encoding="utf-8") == codex_prompt_before
     final_log = lark_log.read_text(encoding="utf-8")
-    assert "当前已配置的模型通道都在恢复中" in final_log
-    assert "这次请求没有执行" in final_log
+    assert "当前模型通道未能开始完成这次请求" in final_log
+    assert "没有自动重复操作" in final_log
 
     monkeypatch.setattr(db_module, "DB_PATH", db_path)
     if db_module._connection is not None:
@@ -538,11 +563,12 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
         "process_actions(){ printf '%s' \"$1\"; }\n"
         "resolve_memorial_thread_after_reply(){ :; }\n"
         + _bot_function("looks_like_error")
-        + _bot_function("delivery_reply_reliable")
-        + _bot_function("run_codex_locked")
-        + _bot_function("with_primary_model_credential")
-        + _bot_function("with_openai_credential")
-        + _bot_function("handle_message")
+            + _bot_function("delivery_reply_reliable")
+            + _bot_function("with_primary_model_credential")
+            + _bot_function("with_openai_credential")
+            + _bot_function("exec_model_worker")
+            + _bot_function("exec_owner_model_worker")
+            + _bot_function("handle_message")
         + "handle_message \"$@\"\nwait\n",
         encoding="utf-8",
     )
@@ -552,6 +578,10 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
     assert syntax.returncode == 0, syntax.stderr
 
     lark_log = tmp_path / "lark.log"
+    openai_server = _start_fake_openai()
+    openai_base = (
+        f"http://127.0.0.1:{openai_server.server_address[1]}/v1"
+    )
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
@@ -578,32 +608,42 @@ def test_production_handler_codex_usage_limit_reaches_final_gpt(
         "OPENAI_FALLBACK_ENABLED": "true",
         "OPENAI_FALLBACK_MODEL": "gpt-api-final",
         "OPENAI_API_KEY": "sk-test",
+        "OPENAI_BASE_URL": openai_base,
         "FAKE_CLAUDE_LOG": str(tmp_path / "claude.log"),
         "FAKE_LARK_LOG": str(lark_log),
     }
-    result = subprocess.run(
-        [
-            "bash", str(harness), "ou_owner", "继续完成白皮书", "om-gpt-e2e",
-            "session-gpt-e2e", "", "p2p", "ou_owner",
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "bash", str(harness), "ou_owner", "继续完成白皮书", "om-gpt-e2e",
+                "session-gpt-e2e", "", "p2p", "ou_owner",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        openai_server.shutdown()
+        openai_server.server_close()
 
     assert result.returncode == 0, result.stderr
     assert "command not found" not in result.stderr
     logs = (tmp_path / "bot.log").read_text(encoding="utf-8")
-    assert "Codex fallback failed (exit=75" in logs
-    assert "OpenAI fallback succeeded" in logs
+    assert "Model Runtime call=" in logs
+    assert "status=succeeded route=GPT fallback model=gpt-api-final" in logs
     delivery_log = lark_log.read_text(encoding="utf-8")
     assert "已由最终 GPT 备用通道接管" in delivery_log
     assert "GPT 兜底" in delivery_log
     turn = _wait_for_turn(db_path, "ou_owner")
     assert turn["provider"] == "GPT fallback"
     assert turn["model"] == "gpt-api-final"
+    with sqlite3.connect(db_path) as connection:
+        routes = connection.execute(
+            "SELECT route_id FROM model_runtime_attempts ORDER BY id"
+        ).fetchall()
+    assert routes == [("primary",), ("codex",), ("openai",)]
 
 
 def test_queued_handler_refuses_execution_after_logical_session_switch(tmp_path):

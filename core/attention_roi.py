@@ -27,7 +27,7 @@ mostly healthy and a blunt governor would do more harm than good:
     hundred ignored cards.
 
 Every change is announced on a card. A governor that silently rewires where
-Pascal's attention goes would be exactly the kind of invisible authority this
+the owner's attention goes would be exactly the kind of invisible authority this
 codebase refuses everywhere else.
 """
 
@@ -125,7 +125,7 @@ def _engaged(state: dict) -> bool:
                     sources toward ~100% and frozen the demotion this module
                     exists to perform.
       __external__  upstream truth, not attention. eigenflux-friends measured
-                    13/13 = 100% engaged on decision cards Pascal had tapped
+                    13/13 = 100% engaged on decision cards the owner had tapped
                     exactly ZERO times — every one was resolved by EigenFlux
                     itself. That single inversion is why the governor never
                     demoted the worst-performing decision source in the ledger.
@@ -211,7 +211,7 @@ def evaluate(stats: dict[tuple[str, str], dict] | None = None) -> dict:
         # A demoted source now emits notice cards, so its recovery evidence
         # lives in the NOTICE lane. Reading the decision lane instead would
         # find nothing (it was demoted) and promote it back every cycle —
-        # a flip-flop that would re-interrupt Pascal every six hours.
+        # a flip-flop that would re-interrupt the owner every six hours.
         stat = stats.get((source, ATTENTION_NOTICE))
         if stat is None or stat["n"] < MIN_SAMPLE:
             continue          # not enough evidence either way; hold as-is
@@ -301,6 +301,10 @@ def refresh(announce: bool = True) -> list[str]:
                 source="attention-roi",
                 title="调整了几个来源的打扰级别",
                 work_receipt="复算最近两周读卡反馈并应用新的来源打扰级别",
+                owner_need="none",
+                why_now="",
+                owner_action="",
+                silence_cost="",
                 body=("按最近两周你实际回应的情况自动调整：\n\n"
                       + "\n".join(f"- {c}" for c in changes)
                       + "\n\n改错了就告诉我，我改回去。"),

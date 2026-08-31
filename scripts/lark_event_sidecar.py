@@ -15,7 +15,7 @@ Behavior:
   handler): feedback → engagement_log.jsonl; watchlater → watchlater_save;
   returns a toast. Not forwarded — bot.sh's card branch stays dormant.
 
-Enable (after Pascal provides the App Secret from the dev console):
+Enable (after the owner provides the App Secret from the dev console):
   1. put the secret in the environment:  export LARK_APP_SECRET=...
      (app id auto-read from `lark-cli config show`, or LARK_APP_ID)
   2. export JARVIS_EVENT_BACKEND=sidecar   (read by plugins/lark/client.sh)
@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # kills the orphaned receive task; a server-pushed finite ReconnectCount can
 # run out — while the main coroutine (_select) keeps the process alive
 # forever. Every supervisor (bot.sh 5s loop, components.yaml pgrep, daemon
-# ps-match) only checks process EXISTENCE, so a dead link means Pascal's
+# ps-match) only checks process EXISTENCE, so a dead link means the owner's
 # messages silently drop with zero alerts. Translate "link down" into the one
 # signal supervision understands: process exit (bot.sh respawns within 5s).
 #
@@ -167,7 +167,7 @@ def _closure_confirmation_card(ok: bool, outcome: str = "done",
     """Persistent card body shown after a one-tap intent closure.
 
     Toasts disappear too quickly on mobile; returning a raw replacement card
-    gives Pascal visible proof that the loop is closed.
+    gives the owner visible proof that the loop is closed.
     """
     title = "闭环已记录" if ok else "闭环无需重复记录"
     if ok:

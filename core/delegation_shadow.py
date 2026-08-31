@@ -241,7 +241,7 @@ def render_gate(metrics: dict) -> str:
     head = (f"影子候选 {metrics.get('predictions')} 条，已标注 {labeled} 条，"
             f"待复核 {unlabeled} 条。")
     if metrics.get("phase1_ready"):
-        return head + "\n准出门槛已全部满足 —— 是否放行由 Pascal 决定。"
+        return head + "\n准出门槛已全部满足 —— 是否放行由用户决定。"
     return head + "\n还差：" + "；".join(gaps or ["（无标注样本，无法评估）"])
 
 

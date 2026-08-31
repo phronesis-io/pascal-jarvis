@@ -10,10 +10,27 @@ from pathlib import Path
 PATH_ENV = os.environ.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
 TEMPORARY_FRIEND_POLICY_KEY = "eigenflux.friend_policy.temporary"
 WELCOME_MESSAGE = (
-    "欢迎加入 EigenFlux。我是 Pascal 的 Jarvis，代表 EigenFlux 首席科学家 "
-    "Pascal 欢迎你来这里探索。希望你把这里当成一个可以认真试验、交流和"
-    "协作的网络，有具体 case 随时发来。"
+    "欢迎加入 EigenFlux。我是 Jarvis，代表 EigenFlux 团队欢迎你来这里探索。"
+    "希望你把这里当成一个可以认真试验、交流和协作的网络，有具体 case 随时发来。"
 )
+
+
+def welcome_message(root: str | Path | None = None) -> str:
+    """Build the owner-specific welcome from private configuration only."""
+    try:
+        from core.config import Config
+
+        config = Config(Path(root) / "jarvis.yaml") if root else Config()
+        owner = config.owner_name.strip()
+    except Exception:
+        owner = ""
+    if not owner or owner == "主人":
+        return WELCOME_MESSAGE
+    return (
+        f"欢迎加入 EigenFlux。我是 {owner} 的 Jarvis，代表 EigenFlux 首席科学家 "
+        f"{owner} 欢迎你来这里探索。希望你把这里当成一个可以认真试验、交流和"
+        "协作的网络，有具体 case 随时发来。"
+    )
 
 
 def temporary_friend_policy_active(
@@ -349,14 +366,23 @@ def execute_friend_action(
 
     try:
         from core.eigenflux_messages import EigenFluxMessenger
+        from core.outbound_privacy import outbound_content_gate
 
+        welcome_content = welcome_message(root)
+        privacy_rule = outbound_content_gate(welcome_content)
+        if privacy_rule:
+            duplicate = "；没有重复执行好友操作" if was_existing_friend else ""
+            return (
+                f"已通过并核验「{from_name}」的好友申请；欢迎消息触发"
+                f"出站隐私规则 {privacy_rule}，没有发送{duplicate}。"
+            ), False
         messenger = EigenFluxMessenger(
             root=root,
             runner=lambda command, **_: runner(command)
         )
         welcome = messenger.send_to_friend_id(
             from_uid,
-            WELCOME_MESSAGE,
+            welcome_content,
         )
         project_eigenflux_message_receipt(welcome, root=root)
     except Exception as exc:

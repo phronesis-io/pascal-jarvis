@@ -377,7 +377,7 @@ class IterationStore:
             ),
             goal="消除该真实故障，并用发布后的同源指标证明结果。",
             non_goals=["不因单次噪声扩大功能范围", "不降低现有安全和隐私门槛"],
-            product_direction="只在问题真正需要 Pascal 判断时创建一个聚合事项。",
+            product_direction="只在问题真正需要用户判断时创建一个聚合事项。",
             technical_direction="先补确定性复现和观测，再修复并保留发布后回读。",
             acceptance=[
                 "原始信号不再出现",
@@ -1405,7 +1405,7 @@ class DailyObserver:
             for signal in signals:
                 # Component health is operational evidence with an automatic
                 # owner (watchdog/Guardian/provider chain). Turning it into a
-                # Pascal-facing product proposal made internal failures look
+                # the owner-facing product proposal made internal failures look
                 # like decisions he had to put into the R&D queue.
                 if signal.get("category") == "component_health":
                     continue
@@ -1482,6 +1482,10 @@ def sync_proposal_item(
         title=proposal["title"],
         body=body,
         work_receipt="聚合反馈、核对历史记录并完成产品与工程方向比较",
+        owner_need="judgment",
+        why_now="改进建议已形成完整方案，只剩是否进入执行队列的价值判断",
+        owner_action="决定是否让这项建议进入执行队列",
+        silence_cost="不提示会让已完成的改进方案停在人工价值判断之前",
         options=options,
         dedup_key=f"iteration-proposal:{proposal['id']}",
         context=_json(

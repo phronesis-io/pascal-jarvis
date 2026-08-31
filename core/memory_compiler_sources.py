@@ -9,6 +9,7 @@ from typing import Any
 from core.memory_compiler_common import (
     DEFAULT_BATCH_SIZE,
     INPUT_SCHEMA,
+    MAX_BATCH_FAILURES,
     MAX_CLAIMS_PER_SOURCE,
     OUTPUT_SCHEMA,
     SOURCE_SCAN_PAGE_SIZE,
@@ -44,6 +45,14 @@ def _linked_session_matter(provider: str, session_id: str) -> str:
         (provider, session_id),
     ).fetchone()
     return str(row[0] or "") if row else ""
+
+
+def _eligible_conversation_source(role: str, matter_id: str) -> bool:
+    """Keep owner words, plus assistant evidence scoped to a known Matter."""
+    normalized_role = str(role or "").strip().casefold()
+    return normalized_role == "user" or (
+        normalized_role == "assistant" and bool(str(matter_id or "").strip())
+    )
 
 
 def _session_sources(
@@ -90,6 +99,9 @@ def _session_sources(
                 provider = str(row["provider"] or "")
                 session_id = str(row["session_id"] or "")
                 role = str(row["role"] or "")
+                matter_id = _linked_session_matter(provider, session_id)
+                if not _eligible_conversation_source(role, matter_id):
+                    continue
                 sources.append({
                     "source_ref": source_ref,
                     "source_kind": "session_turn",
@@ -97,7 +109,7 @@ def _session_sources(
                     "role": role,
                     "activation_policy": source_activation_policy(role, text),
                     "occurred_at": str(row["occurred_at"] or ""),
-                    "matter_id": _linked_session_matter(provider, session_id),
+                    "matter_id": matter_id,
                     "text": text,
                     "metadata": {
                         "session_id": session_id,
@@ -125,6 +137,11 @@ def _lark_sources(*, known: set[str], limit: int) -> list[dict[str, Any]]:
                           matter_id,context_key
                      FROM conversation_turns
                     WHERE memory_eligible=1
+                      AND (
+                        LOWER(role)='user'
+                        OR (LOWER(role)='assistant'
+                            AND COALESCE(matter_id,'')<>'')
+                      )
                     ORDER BY id DESC LIMIT ?""",
                 (SOURCE_SCAN_PAGE_SIZE,),
             ).fetchall()
@@ -134,6 +151,11 @@ def _lark_sources(*, known: set[str], limit: int) -> list[dict[str, Any]]:
                           matter_id,context_key
                      FROM conversation_turns
                     WHERE memory_eligible=1 AND id < ?
+                      AND (
+                        LOWER(role)='user'
+                        OR (LOWER(role)='assistant'
+                            AND COALESCE(matter_id,'')<>'')
+                      )
                     ORDER BY id DESC LIMIT ?""",
                 (before_id, SOURCE_SCAN_PAGE_SIZE),
             ).fetchall()
@@ -147,6 +169,9 @@ def _lark_sources(*, known: set[str], limit: int) -> list[dict[str, Any]]:
             if not text:
                 continue
             role = str(row["role"] or "")
+            matter_id = str(row["matter_id"] or "")
+            if not _eligible_conversation_source(role, matter_id):
+                continue
             sources.append({
                 "source_ref": source_ref,
                 "source_kind": "lark_turn",
@@ -154,7 +179,7 @@ def _lark_sources(*, known: set[str], limit: int) -> list[dict[str, Any]]:
                 "role": role,
                 "activation_policy": source_activation_policy(role, text),
                 "occurred_at": str(row["created_at"] or ""),
-                "matter_id": str(row["matter_id"] or ""),
+                "matter_id": matter_id,
                 "text": text,
                 "metadata": {
                     "message_id": str(row["message_id"] or ""),
@@ -181,6 +206,86 @@ def _pending_batch() -> dict[str, Any] | None:
     result["payload"] = decode(result.get("payload"), {})
     result["source_refs"] = decode(result.get("source_refs"), [])
     return result
+
+
+def pending_batch() -> dict[str, Any] | None:
+    """Return bounded retry metadata for the oldest pending batch."""
+    result = _pending_batch()
+    if result is None:
+        return None
+    return {
+        "id": str(result["id"]),
+        "attempts": int(result.get("attempts") or 0),
+        "created_epoch": float(result.get("created_epoch") or 0),
+        "source_count": len(result.get("source_refs") or []),
+        "last_error": str(result.get("last_error") or "")[:240],
+    }
+
+
+def record_batch_failure(
+    error: str, *, batch_id: str = "", now: float | None = None,
+) -> dict[str, Any] | None:
+    """Record one failed compile attempt and release a poison batch at three.
+
+    The transaction owns both batch and source state, so a process crash cannot
+    leave the batch terminal while its sources still look pending.
+    """
+    connection = db()
+    epoch = current_epoch(now)
+    detail = flat(error, limit=500) or "compile output was empty"
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if batch_id:
+            row = connection.execute(
+                """SELECT id,attempts FROM memory_compile_batches
+                    WHERE id=? AND status='pending'""",
+                (batch_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """SELECT id,attempts FROM memory_compile_batches
+                    WHERE status='pending'
+                    ORDER BY created_epoch LIMIT 1"""
+            ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+        selected_id = str(row["id"])
+        attempts = int(row["attempts"] or 0) + 1
+        terminal = attempts >= MAX_BATCH_FAILURES
+        if terminal:
+            connection.execute(
+                """UPDATE memory_compile_batches
+                      SET status='failed',attempts=?,payload='{}',
+                          completed_epoch=?,last_error=?
+                    WHERE id=? AND status='pending'""",
+                (attempts, epoch, detail, selected_id),
+            )
+            connection.execute(
+                """UPDATE memory_compile_sources
+                      SET status='ignored',processed_epoch=?
+                    WHERE batch_id=? AND status='pending'""",
+                (epoch, selected_id),
+            )
+        else:
+            connection.execute(
+                """UPDATE memory_compile_batches
+                      SET attempts=?,last_error=?
+                    WHERE id=? AND status='pending'""",
+                (attempts, detail, selected_id),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return {
+        "batch_id": selected_id,
+        "attempts": attempts,
+        "max_attempts": MAX_BATCH_FAILURES,
+        "terminal": terminal,
+        "status": "failed" if terminal else "pending",
+        "error": detail,
+    }
 
 
 def prepare_batch(

@@ -40,7 +40,7 @@ from core.textutil import ellipsize, task_display_name
 # not the paging machinery.
 REPEAT_STREAK = 3
 # One card per source per 24h, healed-or-not — a still-broken source must
-# not buzz Pascal every 15 minutes.
+# not buzz the owner every 15 minutes.
 REALERT_INTERVAL_S = 24 * 3600
 
 _ERRORS_RE = re.compile(r"\berrors=(\d+)\b")

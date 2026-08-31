@@ -5,8 +5,17 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 import tasks.daily_reflect_post as reflect
 from core.jsonl import read_jsonl, write_jsonl
+
+
+@pytest.fixture(autouse=True)
+def retained(monkeypatch):
+    monkeypatch.setattr(
+        reflect, "retained_rhythm_enabled", lambda _name: True
+    )
 
 
 def _fixed_time(fmt: str) -> str:
@@ -143,3 +152,17 @@ def test_non_object_json_envelope_is_rejected_without_leaking(monkeypatch, capsy
         "invalid_response_envelope",
         {"level": "error", "response_type": "list"},
     )]
+
+
+def test_disabled_rhythm_does_not_persist_or_emit(monkeypatch, capsys):
+    monkeypatch.setattr(
+        reflect, "retained_rhythm_enabled", lambda _name: False
+    )
+    monkeypatch.setattr(
+        reflect.sys, "stdin", io.StringIO('{"user_message":"private"}')
+    )
+    monkeypatch.setattr(
+        reflect, "append_entry", lambda _text: pytest.fail("must stay quiet")
+    )
+    assert reflect.main() == 0
+    assert capsys.readouterr().out == ""

@@ -128,6 +128,11 @@ Jarvis 的目标不是更频繁地主动，而是把一批工作推进到只剩�
 一个普通决策批次；紧急、安全和真实时间约束例外。系统健康、自愈和模型降级默认在
 后台解决并留下可查收据，不把运维转嫁给 Pascal。
 
+主动消息还必须通过第一性原理打扰契约。它需要声明不可替代的本人需要（判断、授权、
+时限、托付结果、重要外部变化、主动订阅的陪伴或一个决策批次）、已完成工作和
+`why_now`。如果以后打开 Codex 再问也不会有损失，或 Jarvis 还有工作能自己做，就只
+进账本。详见 `2026-08-28-first-principles-interruption-audit-r21-r40.md`。
+
 ### 3.5 少指令，多契约
 
 提示词不再承担整个系统。稳定原则保持短小；领域事实按需检索；当前任务只收到一份
@@ -238,11 +243,17 @@ Context Packet。任何新增系统指令都必须证明它解决了可复现失
 - 重算并关闭过期、重复、已完成 Matter 的 Memorial/Intent/Handoff；
 - 主动输出默认收紧为“需要判断、确定紧急、明显高价值”三类；
 - 模型调用补齐 task/Matter/成本归因；
-- 把 175 项能力做第一次产品生存审查；
+- 对全部现役能力做产品生存审查，并让新增能力在未归类时 CI fail-closed；
 - 修复生产机本地测试假红、私人文件权限和恢复文档漂移。
 
 **准出：** 连续 14 天零重复开放决策、零已完成 Matter 残留待批，普通主动打扰
 不超过目标且没有漏掉安全/时间提醒。
+
+**2026-08-29 工程检查点：** `capability_product_policy.yaml` 已把工程证据与产品
+价值拆开。当前 186 项现役能力逐项落入 82 `keep`、88 `quiet`、16
+`replace-with-codex`、0 `unreviewed`；5 个已删除表层保留 `retire` 记录。所有
+替换项都有真实桌面/手机验收和 owner 确认门槛，新发现但未归类的能力会让生成器与
+CI 失败，不能再因为“有入口、有测试”自动得到产品存续权。
 
 ### Phase 1：Codex Frontstage Contract
 
@@ -260,8 +271,9 @@ Context Packet。任何新增系统指令都必须证明它解决了可复现失
 Agent 不能提供评分、评审者身份或从称赞/沉默中推断通过。每个连接器版本独立积累
 20+20 样本，失败版本修复并升版后重新验证，不能拿旧样本替新实现背书。
 
-**2026-08-27 工程检查点：** Phase 0 协议和 Phase 1 本地 Codex 连接层已经进入
-仓库实现，但尚未宣称 Phase 1 准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
+**2026-08-28 生产检查点：** Phase 0 协议和 Phase 1 本地 Codex 连接层已随
+PR #129--#131 上线，并通过同版本 MCP、组件、投递和发布收据验证；这仍不等于
+Phase 1 准出。`core.matter_runs` 提供单 Matter 原子租约、续租、超时恢复和不可覆盖的运行
 收据；`core.matter_context` 生成带来源引用、权限边界和摘要指纹的
 `jarvis.context-packet.v2`；`core.matter_executor` 让 Claude/Codex 共用同一条
 acquire/run/release 路径。产物必须在 workspace 内存在并按内容哈希，外部动作必须引用
@@ -275,20 +287,21 @@ search/create/start/renew/release/abort/health；`plugins/jarvis-matters` 让 Co
 Context Packet 合成一个自然继续入口；歧义时不绑定。Lark 交接只给稳定 Matter
 短语，不伪造 Codex 深链。`core.matter_closure` 在明确 owner 完成确认后，先统一收掉
 关联 Intent、Item 和 Handoff，再把 Matter 标记完成；活跃 Run、Job、Delegation
-继续阻断，Result Receipt 仍不能自动完成 Matter。以上仍是待审查、待发布代码，且
-Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
+继续阻断，Result Receipt 仍不能自动完成 Matter。以上已在生产部署；Phase 1 的
+桌面/手机 20+20 真实准出证据仍未满足。
 
 **2026-08-27 验收入口检查点：** `core.frontstage_acceptance` 与 Codex MCP 已补齐
 一次性提示和显式 owner 反馈入口。提示状态写入 Matter Run，重复调用不会重复打扰；
 只有成功、收据有效且记录了 desktop/mobile 的运行可参与。`顺` 与五个问题标签由
 固定解析器映射，原话、真实 surface 与提示时连接器版本不可覆盖地保存，迟到回复
-不会污染新版本统计；样本按 `jarvis-matters 0.3.1` 重新起算。
+不会污染新版本统计；唤醒收据闭环后的样本按
+`jarvis-matters 0.4.0` 重新起算。
 这关闭了“有 20+20 门禁但手机用户无法自然提交证据”的产品断点；真实样本仍须在
 发布后逐次产生，不能由测试或 Agent 补造。
 
 ### Phase 2：Memory Compiler
 
-- **仓库实现完成，发布与真实回放待验。** 原始会话只做审计源；
+- **仓库实现、发布和首轮真实数据修复已完成，长期回放指标仍待积累。** 原始会话只做审计源；
 - `core.memory_compiler` 从 Codex、Claude Code 和 owner-private Lark 提取
   带精确引文的事实、决定、产物、待办、约束和偏好；
 - owner 原话可成为有效记忆，assistant 原话只能成为候选；新决定可替代旧决定，
@@ -300,6 +313,11 @@ Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
 
 **准出：** 记忆回放集达到召回/失效指标，提示词显著缩小且任务质量不下降。
 
+**2026-08-28 生产检查点：** PR #130--#131 修复了上下文依赖式短回复和模型语义
+扩写越权。生产修复后 9/9 条 active owner claim 都逐字匹配保留的 owner 引文，
+assistant candidate 为 active 的数量为零，冲突为零。该证据证明首轮迁移正确，
+但不能代替后续跨产品召回率、失效误注入和 token 缩减回放。
+
 ### Phase 3：Model Runtime
 
 - 把分散在 shell、heartbeat 和 fallback 的模型决策收口到一个运行时；
@@ -308,6 +326,18 @@ Phase 1 的桌面/手机 20+20 真实准出证据仍未满足。
 - provider 故障按 provider 处理，不污染业务任务断路器。
 
 **准出：** 所有调用可归因，降级满足时限，单个坏路由不能拖垮调度器。
+
+**2026-08-28 工程检查点：** `core.model_runtime` 已建立第一条共享执行路径：
+`core.aux_model`、压缩、EigenFlux 分析和 idle-noise 判断通过同一个 route plan、总时限、
+副作用重放闸门和 SQLite 调用/尝试收据运行。每次调用必须归属 task，可选绑定 Matter；
+只持久化 prompt digest 和净化后的运行证据。组件检查能看到悬挂调用、连续失败、收据
+不一致和近期的歧义写操作，但只观察、不制造重启循环。具体副作用是否发生仍由所属
+产品连接器权威回读，通用模型层不冒充对账器。后续候选已把模型型 heartbeat 和
+owner-private 飞书对话接入同一 Runtime：bot.sh 仍负责信任分类、会话锁、进度、后台化、
+取消、动作和可靠投递，但一次 turn 的 gate、偏好、真实负载路由、总时限、模型归因与
+副作用重放决策只发生一次。Claude、Codex 和 GPT 任一路径若可能已经执行工具，Runtime
+会停在 `ambiguous`，shell 不再二次重放。群聊和非 owner 私聊仍保留原受限适配路径，
+以上也仍是待审查、待发布候选，因此 Phase 3 仍不能写成准出。
 
 ### Phase 4：Async Personal Organization
 

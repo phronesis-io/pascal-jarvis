@@ -23,52 +23,106 @@ import daemon as daemon_mod
 def test_guardian_alert_has_durable_incident_identity(
     tmp_path, monkeypatch,
 ):
-    from core import delivery
+    from core import memorial
 
     captured = []
     monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_owner")
     monkeypatch.setattr(
-        delivery,
-        "deliver",
-        lambda envelope, **kwargs: (
-            captured.append(envelope)
-            or SimpleNamespace(state="delivered", reason="")
-        ),
+        memorial, "_send_card",
+        lambda card, chat_id="": captured.append(card) or "om_guardian",
     )
 
     assert daemon_mod.notify_lark(
         "⚠️ 组件失联：admin", incident_key="component:admin:down") is True
-    envelope = captured[0]
-    assert envelope.dedup_key == "guardian:component:admin:down"
-    assert envelope.throttle_key == envelope.dedup_key
-    assert envelope.metadata["incident_key"] == "component:admin:down"
-    assert envelope.metadata["audience"] == "owner_private"
-    assert envelope.metadata["recipient_type"] == "open_id"
-    assert envelope.metadata["replayable"] is False
-    assert envelope.metadata["dedup_window_seconds"] == 24 * 3600
+    state = memorial.list_memorials()[0]
+    assert state["source"] == "guardian-daemon"
+    assert state["dedup_key"] == "guardian:component:admin:down"
+    assert state["attention"] == memorial.ATTENTION_ALERT
+    assert state["work_receipt"] == "已自动检查、尝试恢复并复查当前状态"
+    assert [
+        {"key": item["key"], "label": item["label"]}
+        for item in state["options"]
+    ] == [{"key": "ack", "label": "知道就行"}]
+    rendered = json.dumps(json.loads(captured[0]), ensure_ascii=False)
+    assert "知道就行" in rendered
+    assert "聊聊这个" in rendered
+
+
+def test_guardian_ack_does_not_reopen_same_incident_that_day(
+    tmp_path, monkeypatch,
+):
+    from core import memorial
+
+    monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_owner")
+    monkeypatch.setattr(memorial, "_send_card", lambda *_a, **_k: "om_guardian")
+
+    assert daemon_mod.notify_lark("同一事故", incident_key="same-day") is True
+    first = memorial.list_memorials()[0]
+    memorial.decide(first["id"], "ack", owner_authenticated=True)
+    assert daemon_mod.notify_lark("文字变化", incident_key="same-day") is True
+
+    assert len(memorial.list_memorials()) == 1
+
+
+def test_guardian_memorial_cannot_create_recursive_dead_letter(
+    tmp_path, monkeypatch,
+):
+    from core import delivery, memorial
+
+    captured = []
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setattr(
+        delivery,
+        "deliver",
+        lambda envelope, **_kwargs: (
+            captured.append(envelope)
+            or SimpleNamespace(state="attempting", reason="retry", message_id="")
+        ),
+    )
+    state = {
+        "id": "mem_guardian",
+        "source": "guardian-daemon",
+        "title": "系统守护",
+        "body": "已自动处理后复查",
+        "options": [{"key": "ack", "label": "知道就行"}],
+        "extra_buttons": [],
+        "attention": memorial.ATTENTION_ALERT,
+        "review_surface": memorial.REVIEW_NONE,
+        "dedup_key": "guardian:incident",
+    }
+
+    assert memorial._deliver_existing(state, urgent=True) is True
+
+    metadata = captured[0].metadata
+    assert metadata["suppress_dead_letter"] is True
+    assert metadata["dedup_window_seconds"] == 24 * 3600
 
 
 @pytest.mark.parametrize(
-    ("result", "expected", "banner_count"),
+    ("accepted", "state", "expected", "banner_count"),
     [
-        (SimpleNamespace(state="queued", reason="quiet_hours", accepted=True),
-         None, 0),
-        (SimpleNamespace(state="attempting", reason="retry", accepted=True),
-         None, 0),
-        (SimpleNamespace(state="suppressed", reason="metric_daily_cap",
-                         accepted=True), True, 0),
-        (SimpleNamespace(state="suppressed", reason="source_daily_cap",
-                         accepted=True), False, 1),
-        (SimpleNamespace(state="failed", reason="transport", accepted=False),
-         False, 1),
+        (True, {"status": "pending", "delivery_status": "delivered"}, True, 0),
+        (True, {"status": "pending", "delivery_status": "queued"}, None, 0),
+        (False, {"status": "pending", "delivery_status": "retry_queued"}, None, 0),
+        (True, {"status": "pending", "delivery_status": ""}, True, 0),
+        (False, {"status": "pending", "delivery_status": "failed"}, False, 1),
     ],
 )
 def test_guardian_delivery_receipt_is_honest(
-    tmp_path, monkeypatch, result, expected, banner_count,
+    tmp_path, monkeypatch, accepted, state, expected, banner_count,
 ):
-    from core import delivery
+    from core import memorial
 
     banners = []
     monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
@@ -76,7 +130,12 @@ def test_guardian_delivery_receipt_is_honest(
     monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
     monkeypatch.setattr(daemon_mod, "_raise_banner",
                         lambda msg, why: banners.append((msg, why)))
-    monkeypatch.setattr(delivery, "deliver", lambda *a, **k: result)
+    monkeypatch.setattr(
+        memorial, "create", lambda **_kwargs: ("mem_guardian", accepted),
+    )
+    monkeypatch.setattr(
+        memorial, "get_memorial", lambda _memorial_id: dict(state),
+    )
 
     assert daemon_mod.notify_lark(
         "同一个事故，文字可以变化", incident_key="stable-incident") is expected
@@ -290,6 +349,7 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
     brain = tmp_path / ".daemon_brain_state.json"
     brain.write_text(json.dumps({
         "brain_dead": True,
+        "deadman_withhold": True,
         "last_check_ts": time.time(),
     }))
     monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
@@ -308,6 +368,42 @@ def test_external_deadman_withholds_ping_when_heartbeat_is_brain_dead(
     assert daemon_mod._ping_external_deadman() == "withheld_brain_dead"
     assert pinged == []
     assert len(logs) == 1
+
+
+def test_external_deadman_keeps_ping_during_unverified_brain_candidate(
+    tmp_path, monkeypatch,
+):
+    from core import deadman, delivery
+
+    pinged = []
+    brain = tmp_path / ".daemon_brain_state.json"
+    brain.write_text(json.dumps({
+        "brain_dead": True,
+        "deadman_withhold": False,
+        "last_check_ts": time.time(),
+    }))
+
+    class Pipe:
+        def __init__(self, _root):
+            pass
+
+        def transport_health(self):
+            return {"healthy": True, "consecutive_failures": 0}
+
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "BRAIN_STATE_FILE", brain)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        deadman, "status", lambda _root: deadman.DeadmanResult("ok"))
+    monkeypatch.setattr(
+        deadman,
+        "ping_due",
+        lambda _root: pinged.append(True) or deadman.DeadmanResult("ok"),
+    )
+    monkeypatch.setattr(delivery, "DeliveryPipeline", Pipe)
+
+    assert daemon_mod._ping_external_deadman() == "ok"
+    assert pinged == [True]
 
 
 def test_daemon_log_rotation_keeps_multiple_generations(tmp_path, monkeypatch):

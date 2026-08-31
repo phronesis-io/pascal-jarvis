@@ -65,6 +65,109 @@ def test_unconfigured_transport_declines_without_opening_network(tmp_path):
     assert opener.calls == []
 
 
+def test_unconfigured_card_update_declines_without_opening_network(tmp_path):
+    opener = _Opener()
+
+    result = transport.update_card(
+        "om_existing", '{"schema":"2.0"}', root=tmp_path,
+        env={}, opener=opener,
+    )
+
+    assert result.attempted is False
+    assert result.error == "bot_credentials_unavailable"
+    assert opener.calls == []
+
+
+def test_card_update_uses_bot_token_and_patch_receipt():
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "tenant-token", "expire": 7200},
+        {"code": 0, "data": {}},
+    )
+    card = json.dumps({
+        "schema": "2.0",
+        "body": {"elements": [{"tag": "markdown", "content": "新正文"}]},
+    }, ensure_ascii=False)
+
+    result = transport.update_card(
+        "om/a b", card, env=_env(), opener=opener, now_epoch=100,
+    )
+
+    assert result.ok is True
+    assert result.message_id == "om/a b"
+    request = opener.calls[-1][0]
+    assert request.method == "PATCH"
+    assert request.full_url.endswith("/open-apis/im/v1/messages/om%2Fa%20b")
+    assert request.headers["Authorization"] == "Bearer tenant-token"
+    body = _body(opener.calls[-1])
+    assert "新正文" in body["content"]
+
+
+def test_card_update_validates_identity_payload_and_api_receipt():
+    missing_id = transport.update_card(
+        "", '{"schema":"2.0"}', env=_env(), opener=_Opener(),
+    )
+    invalid = transport.update_card(
+        "om_existing", "not-json", env=_env(), opener=_Opener(),
+    )
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "token", "expire": 7200},
+        {"code": 19001, "msg": "message cannot be updated"},
+    )
+    rejected = transport.update_card(
+        "om_existing", '{"schema":"2.0"}', env=_env(), opener=opener,
+    )
+
+    assert missing_id.error == "message_id_required"
+    assert invalid.error == "invalid_payload"
+    assert rejected.error == "message_update_rejected"
+
+
+def test_card_update_refreshes_expired_bot_token_once():
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "stale", "expire": 7200},
+        urllib.error.HTTPError("url", 401, "unauthorized", {}, None),
+        {"code": 0, "tenant_access_token": "fresh", "expire": 7200},
+        {"code": 0, "data": {}},
+    )
+
+    result = transport.update_card(
+        "om_existing", '{"schema":"2.0"}', env=_env(), opener=opener,
+        now_epoch=100,
+    )
+
+    assert result.ok is True
+    assert len(opener.calls) == 4
+    assert opener.calls[1][0].headers["Authorization"] == "Bearer stale"
+    assert opener.calls[3][0].headers["Authorization"] == "Bearer fresh"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (urllib.error.HTTPError("url", 429, "limited", {}, None), "http_429"),
+        (urllib.error.URLError("offline"), "network_error"),
+        (TimeoutError("slow"), "timeout"),
+        (OSError("socket closed"), "request_failed"),
+    ],
+)
+def test_card_update_maps_transport_failures_without_leaking_details(
+    failure, expected,
+):
+    opener = _Opener(
+        {"code": 0, "tenant_access_token": "token", "expire": 7200},
+        failure,
+    )
+
+    result = transport.update_card(
+        "om_existing", '{"schema":"2.0"}', env=_env(), opener=opener,
+    )
+
+    assert result.attempted is True
+    assert result.ok is False
+    assert result.error == expected
+    assert "socket closed" not in repr(result)
+
+
 @pytest.mark.parametrize(
     "custom_base",
     ["http://attacker.invalid", "https://attacker.invalid"],

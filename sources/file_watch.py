@@ -1,6 +1,6 @@
 """file_watch adapter — signal on new/changed files matching globs.
 
-Covers Pascal's named ask: "任何 report 的改动" (ship reports, handoffs,
+Coversthe owner's named ask: "任何 report 的改动" (ship reports, handoffs,
 docs). First run baselines silently (records what exists, emits nothing) so
 enabling a new watch never floods the inbox with pre-existing files.
 """

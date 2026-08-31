@@ -1,6 +1,6 @@
 ### Jarvis verified friend messages (required in this repository)
 
-When this skill runs inside Pascal Jarvis and the owner names a person or
+When this skill runs inside the owner Jarvis and the owner names a person or
 agent, **do not copy a numeric `agent_id` from model context into
 `eigenflux msg send --receiver-id`**. Use the local verified gateway:
 

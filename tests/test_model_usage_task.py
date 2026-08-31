@@ -10,11 +10,20 @@ from tasks import model_usage_post, model_usage_pre
 from tasks.model_usage_post import render_usage_alert
 
 
-def _report(*, issues):
+def _report(*, issues, codex_error=""):
     return {
         "schema": "jarvis.model-usage.v1",
         "observed_at": "2026-08-27T18:00+08:00",
         "fallback_order": ["primary", "codex", "openai"],
+        "fallback_labels": [
+            "Claude 主通道", "Codex 备用通道", "GPT 备用通道",
+        ],
+        "routes": [
+            {"id": "primary", "owner_label": "Claude 主通道"},
+            {"id": "codex", "owner_label": "Codex 备用通道"},
+            {"id": "openai", "owner_label": "GPT 备用通道"},
+        ],
+        "codex": {"error": codex_error},
         "issues": issues,
     }
 
@@ -36,8 +45,11 @@ def test_critical_usage_alerts_once_with_reset_and_fallback(tmp_path):
     first = render_usage_alert(report, state_path=state)
     assert "7 天额度" in first
     assert "已用 93%，还剩约 7%" in first
-    assert "预计 2026-08-30T12:00+08:00 用尽" in first
-    assert "primary -> codex -> openai" in first
+    assert "预计 8月30日 12:00 用尽" in first
+    assert "Claude 主通道、Codex 备用通道、GPT 备用通道" in first
+    assert "2026-" not in first
+    assert "->" not in first
+    assert len(first.splitlines()[2:]) <= 3
     assert render_usage_alert(report, state_path=state) == ""
     assert state.stat().st_mode & 0o777 == 0o600
 
@@ -51,7 +63,7 @@ def test_recovery_rearms_a_later_episode(tmp_path):
     assert render_usage_alert(_report(issues=[issue]), state_path=state)
 
 
-def test_critical_to_exhausted_is_one_episode_but_new_reset_rearms(tmp_path):
+def test_critical_to_exhausted_and_reset_rollover_stay_one_episode(tmp_path):
     state = tmp_path / "alert.json"
     issue = {
         "code": "codex_critical", "route_id": "codex",
@@ -63,7 +75,23 @@ def test_critical_to_exhausted_is_one_episode_but_new_reset_rearms(tmp_path):
     exhausted = {**issue, "code": "codex_exhausted", "used_percent": 100}
     assert render_usage_alert(_report(issues=[exhausted]), state_path=state) == ""
     next_window = {**exhausted, "resets_at": "2026-09-08T10:00+08:00"}
-    assert render_usage_alert(_report(issues=[next_window]), state_path=state)
+    assert render_usage_alert(_report(issues=[next_window]), state_path=state) == ""
+
+
+def test_usage_read_failure_preserves_an_open_episode(tmp_path):
+    state = tmp_path / "alert.json"
+    issue = {
+        "code": "codex_critical", "route_id": "codex",
+        "limit_id": "codex", "window_name": "primary",
+        "window_label": "7 天", "used_percent": 93,
+    }
+    assert render_usage_alert(_report(issues=[issue]), state_path=state)
+    before = state.read_text(encoding="utf-8")
+
+    assert render_usage_alert(
+        _report(issues=[], codex_error="UsageReadError"), state_path=state,
+    ) == ""
+    assert state.read_text(encoding="utf-8") == before
 
 
 def test_recovery_of_one_issue_does_not_repeat_an_existing_issue(tmp_path):

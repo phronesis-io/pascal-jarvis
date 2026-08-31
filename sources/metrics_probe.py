@@ -257,7 +257,7 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
     # is forbidden from merging records, so a persisting condition became a
     # fresh 🚨 card every cycle (20+ "一手源挂了" cards in the week of 7/13,
     # 10 on 7/19 alone, for a condition the evening investigation concluded
-    # was upstream jitter). Level-triggered pages are for machines; Pascal
+    # was upstream jitter). Level-triggered pages are for machines; the owner
     # gets edge-triggered ones.
     raw_alerted = state.get("alerted_today")
     alerted = dict(raw_alerted) if isinstance(raw_alerted, dict) else {}

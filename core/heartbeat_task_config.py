@@ -33,6 +33,7 @@ def _new_task(name: str) -> dict:
         "heavy": False,
         "timeout": None,
         "untrusted_input": False,
+        "private": False,
         "no_tools": False,
         "full_memory": False,
         "model": None,
@@ -64,6 +65,8 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
             current["heavy"] = _enabled(line)
         elif line.startswith("- untrusted-input:"):
             current["untrusted_input"] = _enabled(line)
+        elif line.startswith("- private:"):
+            current["private"] = _enabled(line)
         elif line.startswith("- no-tools:"):
             current["no_tools"] = _enabled(line)
         elif line.startswith("- full-memory:"):
@@ -120,6 +123,7 @@ def shared_batch_eligible(task: dict) -> bool:
     return not any((
         task.get("heavy"),
         task.get("untrusted_input"),
+        task.get("private"),
         task.get("no_tools"),
         task.get("model") == "gpt",
         task.get("memory_purpose") == "outbound",
@@ -129,6 +133,9 @@ def shared_batch_eligible(task: dict) -> bool:
 def policy_isolation_reason(task: dict) -> str:
     """Extra isolation after heavy, untrusted, and no-tool tasks peel off."""
     if not shared_batch_eligible(task):
+        if (task.get("private") and not task.get("heavy")
+                and not task.get("untrusted_input") and not task.get("no_tools")):
+            return "private-primary"
         if (task.get("model") == "gpt" and not task.get("heavy")
                 and not task.get("untrusted_input") and not task.get("no_tools")):
             return "model-route"

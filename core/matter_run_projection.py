@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from core.log import log
-from core.matters import add_event, link_entity
+from core.matters import add_event, get_matter, link_entity
 
 
 def project_event(
@@ -54,13 +54,32 @@ def project_receipt(
                 if run["executor"] in {"claude", "codex"}
                 else "jarvis"
             )
+            existing_link = None
+            matter = get_matter(str(run["matter_id"]))
+            if matter:
+                existing_link = next((
+                    item for item in matter.get("links", [])
+                    if item.get("entity_type") == "session"
+                    and item.get("provider") == session_provider
+                    and str(item.get("entity_id") or "")
+                    == str(run["session_id"])
+                ), None)
+            existing_metadata = (
+                dict(existing_link.get("metadata") or {})
+                if existing_link else {}
+            )
             link_entity(
                 run["matter_id"],
                 "session",
                 run["session_id"],
                 provider=session_provider,
-                title=f"{run['executor']} run {run['run_sequence']}",
+                title=(
+                    str(existing_link.get("title") or "")
+                    if existing_link
+                    else f"{run['executor']} run {run['run_sequence']}"
+                ),
                 metadata={
+                    **existing_metadata,
                     "workspace": run["workspace"],
                     "model": run.get("model", ""),
                     "status": final_status,

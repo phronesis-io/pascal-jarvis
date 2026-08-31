@@ -19,7 +19,7 @@ the running bot actually maintains:
 
 So self-monitoring is REBUILT here as pure functions that read those live
 sources read-only and compute the metrics, rather than reviving the dead
-tables. This is Pascal's data-first principle applied to the monitor itself:
+tables. This is the owner's data-first principle applied to the monitor itself:
 the metric you watch must come from the same bytes the system actually writes.
 
 Everything is read-only. The intent DB is opened sqlite `mode=ro` so a buggy
@@ -51,7 +51,7 @@ from pathlib import Path
 
 # A 'sent' source whose engagement (engaged + late_reply responses) over the
 # window is at or below this fraction is flagged as low-value noise — it is
-# costing Pascal proactive cards without earning replies.
+# costing the owner proactive cards without earning replies.
 LOW_ENGAGEMENT_THRESHOLD = 0.15
 
 # same_intent_refires: an intent that actually starts this many attempts or
@@ -582,7 +582,7 @@ def selfmon_liveness_ok(jarvis_dir) -> tuple[bool, str]:
     alive_evidence = []
 
     # active_sessions.json is a DURABLE conv→session map that is never pruned
-    # (red-team fix): once Pascal has ever messaged the bot it is permanently
+    # (red-team fix): once the owner has ever messaged the bot it is permanently
     # non-empty, so "non-empty" is NOT a liveness signal — it false-fired
     # 'self-monitoring dead' on an idle/closed laptop. Require RECENCY: the
     # file (or heartbeat_state) must have been touched within the window.

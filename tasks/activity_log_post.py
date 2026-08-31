@@ -2,7 +2,7 @@
 """Post-hook: append activity entries to system/activity_log.jsonl.
 
 This is a SILENT task — never outputs to user.
-Maintains a rolling 7-day log of what Pascal actually did.
+Maintains a rolling 7-day log of what the owner actually did.
 """
 
 import os

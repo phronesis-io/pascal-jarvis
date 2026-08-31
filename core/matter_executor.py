@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -65,43 +66,36 @@ def prepare_handoff(matter_id: str, provider: str,
     if matter is None:
         raise KeyError(f"matter not found: {matter_id}")
     workspace_path = Path(workspace or os.getcwd()).expanduser().resolve()
-    desired_task = task or matter.get("next_action", "")
-    try:
-        run, context_path = _new_run_context(
-            matter_id, provider, workspace_path,
-            desired_task,
-        )
-    except MatterRunConflict:
-        reusable = next((
-            item for item in list_runs(matter_id=matter_id, limit=5)
-            if item["status"] == "acquired"
-            and item["executor"] == provider
-            and item["task"] == desired_task
-            and Path(item["workspace"]).resolve() == workspace_path
-            and item["context_digest"]
-            and Path(item["context_path"]).is_file()
-            and Path(item["context_path"]).with_suffix(".json").is_file()
-            and float(item["lease_expires_epoch"]) > time.time()
-        ), None)
-        if reusable is None:
-            raise
-        run = reusable
-        context_path = Path(run["context_path"])
-    command = (
-        f"./scripts/jarvis-matter launch {matter_id} {provider} "
-        f"--run-id {run['id']}"
-    )
+    desired_task = str(task or matter.get("next_action", "")).strip()
+    bundle = build_context_bundle(matter_id)
+    context_path = write_context_bundle(matter_id)
+    command_parts = [
+        "./scripts/jarvis-matter",
+        "launch",
+        matter_id,
+        provider,
+        "--workspace",
+        str(workspace_path),
+    ]
+    if desired_task:
+        command_parts.extend(("--prompt", desired_task))
+    command = " ".join(shlex.quote(part) for part in command_parts)
     add_event(
         matter_id, "handoff_prepared", f"准备交接给 {provider}", actor=actor,
         payload={"provider": provider, "context_path": str(context_path),
-                 "command": command, "run_id": run["id"],
-                 "context_digest": run["context_digest"]},
+                 "command": command, "run_id": "",
+                 "context_packet_id": bundle["packet_id"],
+                 "context_digest": bundle["digest"],
+                 "matter_lease_started": False},
     )
     return {
         "matter_id": matter_id,
-        "run_id": run["id"],
+        "run_id": "",
         "provider": provider,
         "context_path": str(context_path),
+        "context_packet_id": bundle["packet_id"],
+        "context_digest": bundle["digest"],
+        "matter_lease_started": False,
         "command": command,
     }
 
@@ -137,19 +131,42 @@ def _git_files(workspace: Path) -> set[str]:
 
 def _keep_lease_alive(run_id: str, stop: threading.Event) -> None:
     """Renew long foreground sessions without extending abandoned handoffs."""
-    while not stop.wait(60):
-        try:
-            renew_run(run_id, lease_seconds=21600)
-        except Exception as exc:
-            from core.log import log
-            log(
-                "matter-runtime",
-                "lease_renewal_failed",
-                level="error",
-                run_id=run_id,
-                error_type=type(exc).__name__,
-            )
-            return
+    from core.db import independent_connection
+    from core.log import log
+
+    failures = 0
+    wait_seconds = 60.0
+    with independent_connection() as connection:
+        while not stop.wait(wait_seconds):
+            try:
+                renew_run(
+                    run_id,
+                    lease_seconds=21600,
+                    connection=connection,
+                )
+                failures = 0
+                wait_seconds = 60.0
+            except (KeyError, MatterRunConflict) as exc:
+                log(
+                    "matter-runtime",
+                    "lease_renewal_stopped",
+                    level="warn",
+                    run_id=run_id,
+                    error_type=type(exc).__name__,
+                )
+                return
+            except Exception as exc:
+                failures += 1
+                wait_seconds = min(5.0 * (2 ** (failures - 1)), 60.0)
+                log(
+                    "matter-runtime",
+                    "lease_renewal_retry",
+                    level="warn",
+                    run_id=run_id,
+                    failure_count=failures,
+                    retry_in_seconds=wait_seconds,
+                    error_type=type(exc).__name__,
+                )
 
 
 def _last_assistant(path: str | Path, provider: str) -> str:
@@ -351,10 +368,29 @@ def launch(matter_id: str, provider: str, workspace: str | Path | None = None,
     # Do not claim files that were already dirty before the handoff. A launcher
     # cannot safely attribute those edits without hashing every worktree file.
     changed = _git_files(workspace) - before_files
-    record_completion(
-        matter_id, provider, session, workspace, changed, result.returncode,
-        run_id=run_id,
-    )
+    try:
+        record_completion(
+            matter_id, provider, session, workspace, changed,
+            result.returncode, run_id=run_id,
+        )
+    except BaseException as exc:
+        failure = (
+            f"completion_receipt_failed:{type(exc).__name__}:"
+            f"{' '.join(str(exc).split())[:200]}"
+        ).rstrip(":")
+        try:
+            abort_run(run_id, error=failure)
+        finally:
+            from core.log import log
+            log(
+                "matter-runtime",
+                "completion_receipt_failed",
+                level="error",
+                matter_id=matter_id,
+                run_id=run_id,
+                error=failure,
+            )
+        raise
     return int(result.returncode)
 
 

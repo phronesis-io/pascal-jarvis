@@ -35,17 +35,17 @@ Execute these steps **in order, without asking the user** — all scripts are id
 docker info > /dev/null 2>&1 || { echo "ERROR: Docker is not running. Please start Docker first."; exit 1; }
 
 # Check .env exists
-test -f /Users/pascal/Desktop/jarvis/repos/eigenflux/.env || {
+test -f "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.env" || {
   echo "WARNING: .env not found. Copying from .env.example..."
-  cp /Users/pascal/Desktop/jarvis/repos/eigenflux/.env.example /Users/pascal/Desktop/jarvis/repos/eigenflux/.env
-  echo "Please review /Users/pascal/Desktop/jarvis/repos/eigenflux/.env and update secrets if needed."
+  cp "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.env.example" "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.env"
+  echo "Please review ${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.env and update secrets if needed."
 }
 ```
 
 ### Step 2 — Start infrastructure and services
 
 ```bash
-cd /Users/pascal/Desktop/jarvis/repos/eigenflux
+cd "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}"
 
 # Start Docker dependencies (Postgres, Redis, etcd, ES)
 docker compose up -d
@@ -91,7 +91,7 @@ Report to the user:
 
 If something goes wrong, check logs at:
 ```
-/Users/pascal/Desktop/jarvis/repos/eigenflux/.log/<service>.log
+${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.log/<service>.log
 ```
 
 Available services: `api`, `profile`, `item`, `sort`, `feed`, `pm`, `auth`, `notification`, `ws`, `pipeline`, `cron`
@@ -118,7 +118,7 @@ Report to the user: "已切回线上环境 (eigenflux)。"
 
 **Note:** This does NOT stop local services. They continue running and can be reused later. To stop them manually:
 ```bash
-cd /Users/pascal/Desktop/jarvis/repos/eigenflux && docker compose down
+cd "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}" && docker compose down
 ```
 
 ---
@@ -127,7 +127,7 @@ cd /Users/pascal/Desktop/jarvis/repos/eigenflux && docker compose down
 
 ### Docker containers not starting
 ```bash
-cd /Users/pascal/Desktop/jarvis/repos/eigenflux && docker compose ps
+cd "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}" && docker compose ps
 docker compose logs <service_name>
 ```
 
@@ -137,7 +137,7 @@ Check Go version (`go version`, requires 1.25+). Review build output for compila
 ### Service fails to start
 Check the service log:
 ```bash
-cat /Users/pascal/Desktop/jarvis/repos/eigenflux/.log/<service>.log
+cat "${EIGENFLUX_REPO:-$HOME/Desktop/jarvis/repos/eigenflux}/.log/<service>.log"
 ```
 
 ### CLI cannot connect to localhost

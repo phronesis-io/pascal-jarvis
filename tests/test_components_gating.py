@@ -405,6 +405,46 @@ def test_ef_stream_connecting_requires_fresh_poll_after_startup_grace(
     assert "poll verified" in detail
 
 
+def test_ef_stream_poll_fallback_is_available_but_visibly_degraded(
+        tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(
+        components,
+        "_check_pgrep",
+        lambda _comp, _root: (True, "pid 123 owned"),
+    )
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ef_stream_health.json").write_text(json.dumps({
+        "status": "degraded",
+        "updated_epoch": now,
+        "started_epoch": now - 3600,
+        "quiet_streak": 6,
+    }))
+    (data / "ef_ingress_health.json").write_text(json.dumps({
+        "status": "ok",
+        "last_success_epoch": now,
+    }))
+    manifest = _manifest(tmp_path, """
+  - name: ef-stream
+    check: ef_stream
+    path: data/ef_stream_health.json
+    reconcile_path: data/ef_ingress_health.json
+    max_age_seconds: 2400
+    reconcile_max_age_seconds: 900
+""")
+
+    (result,) = check_components(manifest_path=manifest, root=tmp_path)
+    report = format_report([result])
+
+    assert result["ok"] is True
+    assert result["degraded"] is True
+    assert "△ ef-stream" in report
+    assert "poll verified" in report
+    assert "1 degraded" in report
+    assert "⚠️" not in report
+
+
 def test_ef_stream_active_path_does_not_depend_on_polling_fallback(
         tmp_path, monkeypatch):
     """8/26 incident: a stale independent poll must not make Guardian kill a

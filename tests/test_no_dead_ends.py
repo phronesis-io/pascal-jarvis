@@ -62,6 +62,7 @@ def test_docket_never_renders_a_desk_button(env):
             e["ts"] = stamp
         lines.append(json.dumps(e, ensure_ascii=False))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    memorial._record_delivery(mid, "delivered")
 
     summary = memorial_escrow.run(now=now, send=True)
     docket = memorial.get_memorial(summary["docket_id"])

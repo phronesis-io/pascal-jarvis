@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mail-triage engine — the "RSS for email" reader.
 
-Pascal asked (2026-06-13): treat every incoming email like an RSS item — when
+the owner asked (2026-06-13): treat every incoming email like an RSS item — when
 it arrives, READ THE WHOLE BODY, then think about it and surface what matters.
 
 The perception layer (sources/lark_mail.py + sources/imap_mail.py) already syncs

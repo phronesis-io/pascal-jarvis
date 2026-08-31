@@ -40,15 +40,14 @@ Three complementary detectors (a brain-dead loop trips at least one):
      0 on every trip (task_protocol.py:76), so it must NOT be used for window
      COUNTING (its instantaneous value is still a valid threshold — detector 3).
 
-  3. PRIORITY WEDGE (STATELESS). A single PRIORITY task stuck in a sustained
-     failure state. Mirrors admin /health's priority_wedged rule exactly
-     (admin.py _serve_health): consecutive_failures >= WEDGE_CONSEC_THRESHOLD,
-     OR last_success stale past STARVATION_FACTOR×interval with a failing
-     last_status. Red-team 7/9: on 7/8 intention-check wedged 16:04→23:37 and
+  3. PRIORITY WEDGE (STATEFUL). A single PRIORITY task stuck in a sustained
+     failure state. A stale failing success watermark is enough evidence;
+     the noisier consecutive-failure arm must persist for WEDGE_MIN_SECONDS.
+     Red-team 7/9: on 7/8 intention-check wedged 16:04→23:37 and
      BOTH detectors above missed it — the wedged task stopped advancing
      total_runs, so detector 2 held its window count forever (the d_r == 0
      branch), and detector 1 needs recently_ran plus TWO starved tasks. The
-     only page Pascal got was the duplicate degraded-channel alert he had
+     only page the owner got was the duplicate degraded-channel alert he had
      just asked to be deleted; this detector is what makes that deletion's
      premise ("brain-health owns the wedge alert") actually true. A single
      wedged PRIORITY task pages — priority tasks are infrastructure, there
@@ -79,14 +78,20 @@ FAIL_WINDOWS_THRESHOLD = 2
 # single starved task is already reported by the watermark/self-diagnostic path.
 MIN_STARVED_FOR_SYSTEMIC = 2
 
-# Detector 3: a PRIORITY task with consecutive_failures at/above this is
-# wedged. Mirrors admin /health's priority_wedged rule — keep the two in
-# lockstep, or a wedge admin can see becomes invisible again (the exact 7/8
-# gap this closes). consecutive_failures resets on circuit trip
+# Detector 3: a PRIORITY task with consecutive_failures at/above this is a
+# wedge candidate. The Guardian verdict is intentionally stronger than the
+# admin's early warning: the candidate must survive WEDGE_MIN_SECONDS before
+# it can suppress an external dead-man ping. consecutive_failures resets on circuit trip
 # (task_protocol.py) and on real successes, but empty_pre cycles refresh
 # last_success WITHOUT resetting it — so a frozen >=3 is a durable "the
 # Claude side of this task keeps failing / stopped running" signal.
 WEDGE_CONSEC_THRESHOLD = 3
+
+# Three quick provider failures are an early diagnostic signal, not proof that
+# the whole brain is dead. Persist the candidate for 30 minutes before the
+# Guardian-level verdict. A stale-and-failing success watermark remains an
+# immediate arm because it already proves more than two missed task intervals.
+WEDGE_MIN_SECONDS = 30 * 60
 
 # Safety default when a task has no parseable interval (seconds).
 _DEFAULT_INTERVAL = 600
@@ -149,17 +154,27 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
         disabled_until = circuit.get("disabled_until", 0) or 0
         consecutive = circuit.get("consecutive_failures", 0) or 0
 
-        # ── Detector 3: PRIORITY wedge (stateless) ──
-        # Same rule as admin /health's priority_wedged (see module docstring).
+        # ── Detector 3: PRIORITY wedge (stateful) ──
+        # Admin may expose consecutive failures immediately as a diagnostic;
+        # Guardian waits for a sustained candidate before declaring brain-dead.
         # Deliberately BEFORE the disabled_until skip below: priority circuits
         # are forced closed by the loop, so an open one is itself wedge-shaped,
         # and admin does not skip open circuits either.
         if name in priority:
+            prev = prev_samples.get(name, {}) or {}
             success_age = (now - last_success) if last_success > 0 else 0.0
             success_stale = (last_success > 0
                              and success_age > STARVATION_FACTOR * interval)
-            if (consecutive >= WEDGE_CONSEC_THRESHOLD
-                    or (success_stale and last_status in FAILURE_STATUSES)):
+            stale_failure = success_stale and last_status in FAILURE_STATUSES
+            consecutive_candidate = consecutive >= WEDGE_CONSEC_THRESHOLD
+            prior_since = float(prev.get("wedge_since", 0) or 0)
+            wedge_since = (
+                prior_since if consecutive_candidate and prior_since > 0
+                else (now if consecutive_candidate else 0.0)
+            )
+            if (stale_failure or (
+                    consecutive_candidate
+                    and now - wedge_since >= WEDGE_MIN_SECONDS)):
                 wedged.append((name, success_age))
 
         # ── Detector 2: PRIORITY total_failures windows (stateful) ──
@@ -182,7 +197,8 @@ def assess(*, state: dict, tasks: list[dict], overrides: dict,
                 # else d_r == 0: didn't run this window ⇒ hold the counter
             samples[name] = {"total_failures": total_failures,
                              "total_runs": total_runs,
-                             "fail_windows": fail_windows}
+                             "fail_windows": fail_windows,
+                             "wedge_since": wedge_since}
             if fail_windows >= FAIL_WINDOWS_THRESHOLD:
                 priority_dead.append((name, fail_windows))
 

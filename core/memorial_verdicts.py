@@ -1,4 +1,4 @@
-"""What Pascal already answered, and what still waits on his desk.
+"""What the owner already answered, and what still waits on his desk.
 
 Read side of the memorial ledger for tasks that draft asks (intention-check):
 a recurring intent is a fresh model call with no view of the ledger, so
@@ -24,7 +24,7 @@ def _ledger_ts_epoch(value: str) -> float | None:
 def recent_verdicts(days: int = VERDICT_LOOKBACK_DAYS,
                     limit: int = VERDICT_LIST_MAX,
                     now: float | None = None) -> list[dict]:
-    """What Pascal already answered, and what still waits on his desk.
+    """What the owner already answered, and what still waits on his desk.
 
     Decision cards decided or 留中 within ``days`` plus decision cards still
     pending from that window, newest first. A task that drafts asks

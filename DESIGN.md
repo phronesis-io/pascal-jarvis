@@ -17,6 +17,35 @@ Every user-facing output declares one attention class:
 The system must not route content based on what a transport happens to support.
 It routes based on the human attention cost.
 
+The owner-facing boundary is also available as the versioned read-only
+`jarvis_operating_model` MCP contract. Codex uses it when Pascal asks why
+Jarvis exists or where work should start, so this answer does not depend on a
+model reconstructing product policy from whichever context happens to fit.
+
+The attention class says how a message behaves. `owner_need` says why Jarvis
+has earned the interruption:
+
+- `none`: ledger only;
+- `judgment` / `authority`: completed work has reached an owner-only choice;
+- `deadline`: delaying has a material cost;
+- `requested_result`: explicitly entrusted asynchronous work has returned;
+- `external_change`: a relevant outside person or authoritative state changed;
+- `scheduled_companion`: an explicitly retained, optional rhythm is due;
+- `decision_batch`: several low-urgency judgments earn one bounded review.
+
+Every new explicit owner-visible Item uses the versioned five-field gate:
+`owner_need`, private `work_receipt`, compact `why_now`, one minimal
+`owner_action`, and the concrete `silence_cost`. Unknown or incomplete needs
+fail closed. Historical explicit Items remain auditable under their original
+gate version rather than being silently rewritten. A self-healed incident,
+Agent activity, or something the owner can ask Codex about later without loss
+uses `none`.
+
+Retained rhythms are exact private `jarvis.yaml` booleans, default off, with a
+hard maximum of two. Silence age, model desire to engage, or historical task
+presence cannot enable one. User-created Routines retain their own explicit
+authority and are not reclassified as companion rhythms.
+
 ## Surface Responsibilities
 
 Surface ruling (owner verdict, 2026-08-27): Codex is available on both desktop
@@ -64,6 +93,12 @@ interaction. Therefore:
   when continuity, time, authority, or verified effects justify a Matter.
 - Search before creating a Matter. One recognizable outcome keeps one Matter;
   separate Codex tasks may contribute one verified run at a time.
+- An explicit private Lark `去 Codex` action may prepare a named, empty task.
+  Preparation must read back zero turns, record the real thread ID, and leave
+  the Matter lease untouched. The first owner message starts continuation.
+- A manual Claude/Codex terminal handoff is also a preview, not an execution
+  claim. It may write a bounded Context Packet and launch command, but the
+  Matter lease begins only when that command actually starts the provider.
 
 ### Lark
 
@@ -80,6 +115,9 @@ interaction. Therefore:
   do not render mechanical `已完成` boilerplate. The visible body says the
   useful result naturally. A proposal may ask for the remaining irreversible
   choice, never for research Jarvis could have completed first.
+- Usage forecasts remain available on demand. They do not interrupt the owner
+  until exact package evidence reaches 90% or reports an actual limit, and a
+  transient read failure never pretends the earlier risk recovered.
 - A clipped card exposes `查看全文` as a first-class action. One tap sends the
   complete source in receipt-backed chunks; transport failure keeps the last
   confirmed offset so the same button resumes instead of restarting. On a
@@ -87,6 +125,11 @@ interaction. Therefore:
   and `查看全文` owns the first action row instead of competing with other
   controls.
 - Do not expose retries, tool calls, scheduler logs, or duplicate cards.
+- EigenFlux private mail spends at most one card per clock hour. Jarvis leads
+  with its bounded judgment, keeps peer text to one quoted line, preserves
+  every upstream message ID in the private receipt, and revises the same Lark
+  card in place when more mail arrives. Repeated branding and transport
+  footers are not user value and stay off the card.
 - A thread about one Memorial retains that Memorial as its context.
 
 ### Ledger and Desktop Archive
@@ -137,6 +180,9 @@ interaction. Therefore:
 
 ## Interaction Rules
 
+- Start in Codex when the owner initiates exploration, creation, analysis,
+  coding, or long-form review. Jarvis initiates only for cross-time triggers,
+  material external change, an entrusted result, or durable coordination.
 - Ask only when ambiguity changes the target, authority, cost, or irreversible
   outcome.
 - A success phrase must be generated from a structured success state.
@@ -170,6 +216,9 @@ interaction. Therefore:
   the user search through an unrelated chat history. Until that path is
   verified, the Lark message must remain independently understandable and may
   not promise a broken deep link.
+- A verified empty task may be named in that message, but mobile visibility is
+  still unproven until the owner completes the real acceptance journey. Keep the
+  stable continuation phrase as fallback.
 
 ## Content and Visual Rules
 

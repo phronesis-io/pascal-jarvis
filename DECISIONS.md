@@ -89,11 +89,17 @@ not create a second preference or route-policy store.
   Matter state machine. Claude Code or another harness may reuse that Python
   contract without MCP.
 - The connector does not scrape or mutate undocumented Codex task storage.
-  Codex app-server is reserved for a future host-driven journey that truly
-  needs programmatic task creation/resumption and streamed approvals.
+  An explicit private-owner Lark handoff may use supported Codex app-server
+  methods to create, name, and read back one empty task. This preparation
+  records a Matter wake receipt but starts neither a model turn nor a Matter
+  lease. Repetition reuses a verified zero-turn task; failure falls back to a
+  stable phrase rather than promising a broken link. The first continuation
+  must return the exact generated wake ID; Jarvis resolves the linked thread,
+  binds it to the Matter Run, and advances the receipt through execution and
+  release. Streaming execution and approval ownership remain in Codex.
 - Jarvis cannot grant an executor Matter-completion authority or accept model
   prose as external-effect evidence. Release closes the run only.
-- Desktop/mobile migration evidence comes only from Pascal's exact response to
+- Desktop/mobile migration evidence comes only from the owner's exact response to
   a once-per-run prompt. MCP may claim that prompt and map the finite published
   labels to evidence, but it cannot supply arbitrary scores, change reviewer
   identity, infer approval, or overwrite a recorded sample. Prompt version and
@@ -281,6 +287,13 @@ route execution, bounded failover, workload-class health, and full attribution
 of task, Matter, provider, observed model, latency, cost, and terminal reason.
 It does not own product state, permissions, or completion truth.
 
+Unattended code mutation is retired. Jarvis may observe evidence, deduplicate
+findings, and prepare proposals; code changes begin only in an owner-started
+Codex or Claude Code task. A real Seatbelt probe proved that a workspace-
+sandboxed process could submit another launchd job outside the controller's
+process boundary, so cleanup could not prove that mutation had ended. Provider
+availability never re-enables this path or weakens the release boundary.
+
 Every Jarvis-owned feature must add at least one capability Codex alone cannot
 reliably provide: durable continuity, useful work while the owner is absent,
 authority and safety governance, cross-system coordination, or verified
@@ -295,7 +308,7 @@ frontstage migration. `core.matter_runs`, `core.matter_context`, and
 artifact/effect verification, Result Receipt v1, expiry recovery, and a
 read-only Phase-0 residue audit. `core.codex_frontstage` combines Matter
 resolution and acquire into one natural continuation call. A Result Receipt
-still cannot auto-close a Matter. `core.matter_closure` acts only on Pascal's
+still cannot auto-close a Matter. `core.matter_closure` acts only on the owner's
 explicit completion words, converges linked Intent/Item/Handoff state, and
 fails closed while a Run, Job, or Delegation is live. This does not move
 proactive delivery out of Lark or claim that Codex mobile notification/resume

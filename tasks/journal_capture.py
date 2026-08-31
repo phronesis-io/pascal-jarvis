@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Capture Pascal's reply to a daily-reflect card into his 《Jarvis 日志》.
+"""Capturethe owner's reply to a daily-reflect card into his 《Jarvis 日志》.
 
 This closes the two-way loop of the PRD's 每日复盘 check-in: daily-reflect
-appends Jarvis's reflection + question; when Pascal quote-replies to that card,
+appends Jarvis's reflection + question; when the owner quote-replies to that card,
 THIS captures HIS words ("我怎么看一些事") under the same day.
 
 Invoked fire-and-forget from bot.sh's reply path (backgrounded, so it never
@@ -11,18 +11,18 @@ delays Jarvis's reply). Fully guarded — any failure is silent.
 Env:
   JV_PARENT     the quoted message_id (the card being replied to); empty for
                 direct (non-quote) messages
-  JV_REPLY      Pascal's raw reply text
+  JV_REPLY      the owner's raw reply text
   JARVIS_DIR    repo root (for engagement_log.jsonl + imports)
   JV_CHAT_TYPE  chat type of the incoming message (p2p/group), optional
   JV_MSG_TYPE   message type (text/image/...), optional
   JV_SENDER     sender open_id, optional
-  JV_USER_ID    Pascal's configured open_id, optional
+  JV_USER_ID    the owner's configured open_id, optional
   JV_JOURNAL_SHADOW_WINDOW_H  attribution window in hours (default 4)
 
 It only journals when the quoted card's source is `daily-reflect` — so ordinary
 chat and other cards are never written to the journal.
 
-REQ-86 SHADOW extension (log-only): a direct (non-quote) p2p text from Pascal
+REQ-86 SHADOW extension (log-only): a direct (non-quote) p2p text from the owner
 within N hours of the daily-reflect card SHOULD also count as a check-in
 answer. Before enabling that write, this script only LOGS the attribution
 decision — (ts, message head, reason, would_capture) — to
@@ -106,7 +106,7 @@ def _shadow_log_direct(reply: str) -> None:
     user_id = (os.environ.get("JV_USER_ID") or "").strip()
 
     # Not attribution candidates at all — skip logging entirely:
-    # group chats, non-text payloads, and messages not from Pascal.
+    # group chats, non-text payloads, and messages not from the owner.
     if chat_type and chat_type != "p2p":
         return
     if msg_type and msg_type != "text":
@@ -173,7 +173,7 @@ def main() -> None:
         return
     try:
         from core.journal import append_entry
-        # heading="" → nest under today's reflection as Pascal's own voice.
+        # heading="" → nest under today's reflection asthe owner's own voice.
         append_entry(f"> 🗣 **你**：{reply}", heading="")
     except Exception:
         return

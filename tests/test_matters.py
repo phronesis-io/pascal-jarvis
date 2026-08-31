@@ -133,6 +133,33 @@ def test_link_requires_explicit_move_between_matters():
     assert get_matter(first["id"])["links"] == []
 
 
+def test_link_can_move_from_a_terminal_matter_without_general_move_authority():
+    first = create_matter("已经结束")
+    second = create_matter("新的结果")
+    link_entity(first["id"], "session", "reused", provider="codex")
+
+    with pytest.raises(ValueError, match="already linked"):
+        link_entity(
+            second["id"], "session", "reused", provider="codex",
+            move_from_terminal=True,
+        )
+
+    update_matter(first["id"], status="done", outcome="完成")
+    moved = link_entity(
+        second["id"], "session", "reused", provider="codex",
+        move_from_terminal=True,
+    )
+
+    assert moved["matter_id"] == second["id"]
+    assert get_matter(first["id"])["links"] == []
+
+    with pytest.raises(ValueError, match="only for session links"):
+        link_entity(
+            first["id"], "artifact", "result.md", provider="file",
+            move_from_terminal=True,
+        )
+
+
 def test_unlink_and_input_validation():
     matter = create_matter("校验")
     link = link_entity(matter["id"], "artifact", "/tmp/result.md", provider="file")

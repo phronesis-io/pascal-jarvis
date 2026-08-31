@@ -9,13 +9,13 @@ classification.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import tempfile
-import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,6 +25,7 @@ from core.claude_bin import resolve_claude_bin
 from core.model_fallback import (
     fallback_for_stderr,
     gate,
+    is_preexecution_error,
     limit_reason,
     trip,
 )
@@ -42,6 +43,9 @@ class AuxiliaryModelResult:
     provider: str = ""
     model: str = ""
     attempted: tuple[str, ...] = ()
+    call_id: str = ""
+    status: str = ""
+    terminal_reason: str = ""
 
 
 def _provider_health_rows(root: str | Path) -> list[dict[str, Any]]:
@@ -82,47 +86,6 @@ def _terminate_process_group(
         process.wait(timeout=0.5)
     except subprocess.TimeoutExpired:
         pass
-
-
-def _provider_candidates(
-    model: str,
-    gate_state: str,
-    root: str | Path | None = None,
-    *,
-    health_rows: list[dict[str, Any]] | None = None,
-) -> list[tuple[str, str, dict[str, str] | None]]:
-    from core.config import Config
-    from core.model_control import route_plan
-
-    base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
-    config = Config(base / "jarvis.yaml")
-    plan = route_plan(
-        "auxiliary_trusted",
-        config=config,
-        gate_state=gate_state,
-        health_rows=health_rows,
-        route_ids=("primary", "backup1", "backup2"),
-    )
-    candidates: list[tuple[str, str, dict[str, str] | None]] = []
-    for route in plan.routes:
-        # An auxiliary request's model tier is a cost/capability contract.
-        # A relay's configured default must not silently turn a Haiku request
-        # into Opus. Claude-compatible backups receive the requested model;
-        # an incompatible relay fails and the route plan advances normally.
-        # Cheap auxiliary tiers are an explicit task contract. Preserve those
-        # across relays instead of silently upgrading them to an expensive
-        # provider default. The generic ``opus`` alias remains relay-owned so
-        # deployments can pin the concrete backup model independently.
-        provider_model = model if model in {"haiku", "sonnet"} else route.model
-        provider_env = without_model_credentials(
-            keep=frozenset({"ANTHROPIC_API_KEY"}),
-        )
-        if route.id != "primary":
-            provider_env = without_model_credentials()
-            provider_env["ANTHROPIC_AUTH_TOKEN"] = route.credential
-            provider_env["ANTHROPIC_BASE_URL"] = route.base_url
-        candidates.append((route.label, provider_model, provider_env))
-    return candidates
 
 
 def _invoke(
@@ -227,12 +190,14 @@ def _openai_result(
     process_holder: dict[str, Any] | None = None,
     process_key: str = "model",
     cancelled: Callable[[], bool] | None = None,
+    route=None,
+    model_override: str = "",
 ) -> tuple[str, str]:
     from core.config import Config
     from core.model_control import model_routes
 
     base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
-    route = next(
+    route = route or next(
         item for item in model_routes(Config(base / "jarvis.yaml"))
         if item.id == "openai"
     )
@@ -242,7 +207,7 @@ def _openai_result(
 
     from core import openai_fallback
 
-    model = route.model or openai_fallback.DEFAULT_MODEL
+    model = model_override or route.model or openai_fallback.DEFAULT_MODEL
     base_url = route.base_url or openai_fallback.DEFAULT_BASE_URL
     max_tokens = int(
         os.environ.get(
@@ -277,24 +242,6 @@ def _openai_result(
     return text.strip(), model
 
 
-def _openai_configured(
-    root: str | Path | None = None,
-    *,
-    health_rows: list[dict[str, Any]] | None = None,
-) -> bool:
-    from core.config import Config
-    from core.model_control import route_plan
-
-    base = Path(root or os.environ.get("JARVIS_DIR") or Path.cwd())
-    plan = route_plan(
-        "auxiliary_trusted",
-        config=Config(base / "jarvis.yaml"),
-        health_rows=health_rows,
-        route_ids=("openai",),
-    )
-    return bool(plan.routes)
-
-
 def run_auxiliary_model(
     prompt: str,
     *,
@@ -311,16 +258,17 @@ def run_auxiliary_model(
     claude_bin: str = "",
     cancelled: Callable[[], bool] | None = None,
     work_dir: str | Path | None = None,
+    task_id: str = "",
+    matter_id: str = "",
+    effect_authority: str = "",
 ) -> AuxiliaryModelResult:
-    """Run an auxiliary call through Claude primary/backups and then GPT.
+    """Run one attributed auxiliary call through the shared Model Runtime."""
+    from core.config import Config
+    from core.model_control import model_routes
+    from core.model_runtime import AdapterResult, RuntimeRequest, execute
+    from core.provider_health import reason_code_for_error
 
-    ``timeout`` is a total wall-clock budget. Provider failures advance without
-    exposing their stdout or stderr as user content. A tripped primary gate is
-    followed without taking the probe election.
-    """
     root_path = Path(root)
-    started = time.monotonic()
-    attempted: list[str] = []
     try:
         gate_state = gate(root_path, probe=False)
     except Exception:
@@ -341,155 +289,225 @@ def run_auxiliary_model(
         finally:
             handle.close()
 
-    try:
-        attempt_index = 0
-        health_rows = _provider_health_rows(root_path)
-        candidates = _provider_candidates(
-            model, gate_state, root_path, health_rows=health_rows
-        )
-        gpt_available = _openai_configured(
-            root_path, health_rows=health_rows
-        )
-        for provider_index, (provider, initial_model, env) in enumerate(
-            candidates
-        ):
-            if cancelled is not None and cancelled():
-                return AuxiliaryModelResult(attempted=tuple(attempted))
-            current_model = initial_model
-            provider_models: set[str] = set()
-            while current_model not in provider_models:
-                if cancelled is not None and cancelled():
-                    return AuxiliaryModelResult(attempted=tuple(attempted))
-                remaining = timeout - (time.monotonic() - started)
-                if remaining <= 0:
-                    return AuxiliaryModelResult(
-                        attempted=tuple(attempted)
-                    )
-                provider_models.add(current_model)
-                attempted.append(f"{provider}:{current_model}")
-                command = [
-                    resolve_claude_bin(claude_bin),
-                    "-p",
-                    "--model",
-                    current_model,
-                    "--disable-slash-commands",
-                ]
-                if prompt_file:
-                    command.extend(["--append-system-prompt-file", prompt_file])
-                command.extend(_session_args(
-                    session_args,
-                    attempt_index,
-                    session_registrar,
-                ))
-                if allow_tools:
-                    command.append("--dangerously-skip-permissions")
-                else:
-                    command.extend(
-                        [
-                            "--permission-mode",
-                            "dontAsk",
-                            "--tools",
-                            "",
-                            "--mcp-config",
-                            '{"mcpServers":{}}',
-                            "--strict-mcp-config",
-                        ]
-                    )
-                attempt_index += 1
-                later_routes = (
-                    len(candidates) - provider_index - 1
-                    + int(gpt_available)
-                )
-                attempt_timeout = (
-                    remaining
-                    if later_routes == 0
-                    else max(0.05, remaining / (later_routes + 1))
-                )
-                try:
-                    result = _invoke(
-                        command,
-                        prompt,
-                        timeout=attempt_timeout,
-                        cwd=str(work_dir or root_path),
-                        env=env,
-                        runner=runner,
-                        process_holder=process_holder,
-                        process_key=process_key,
-                        cancelled=cancelled,
-                    )
-                except (subprocess.TimeoutExpired, OSError):
-                    break
-                if cancelled is not None and cancelled():
-                    return AuxiliaryModelResult(attempted=tuple(attempted))
+    attempt_index = [0]
 
-                text = (result.stdout or "").strip()
-                error_text = "\n".join(
-                    part
-                    for part in (result.stderr or "", result.stdout or "")
-                    if part
-                )
-                if (
-                    result.returncode == 0
-                    and text
-                    and not looks_like_error(text, proactive=True)
-                ):
-                    return AuxiliaryModelResult(
-                        text=text,
-                        provider=provider,
-                        model=current_model,
-                        attempted=tuple(attempted),
-                    )
-                reason = limit_reason(error_text)
-                if provider == "Claude primary" and reason:
-                    try:
-                        trip(reason, root_path)
-                    except Exception:
-                        pass
-                next_model = fallback_for_stderr(
-                    current_model, error_text
-                )
-                if not next_model:
-                    break
-                current_model = next_model
-
-        remaining = timeout - (time.monotonic() - started)
-        if (
-            remaining <= 0
-            or not gpt_available
-            or (cancelled is not None and cancelled())
-        ):
-            return AuxiliaryModelResult(attempted=tuple(attempted))
-        attempted.append(
-            "GPT fallback:"
-            + (
-                os.environ.get("OPENAI_FALLBACK_MODEL")
-                or os.environ.get("OPENAI_MODEL")
-                or "gpt-5.5"
+    def claude_adapter(route, request, current_model, attempt_timeout):
+        if cancelled is not None and cancelled():
+            return AdapterResult(
+                status="cancelled", reason="cancelled", effects_started=False,
             )
+        provider_env = without_model_credentials(
+            keep=frozenset({"ANTHROPIC_API_KEY"}),
         )
+        if route.id != "primary":
+            provider_env = without_model_credentials()
+            provider_env["ANTHROPIC_AUTH_TOKEN"] = route.credential
+            provider_env["ANTHROPIC_BASE_URL"] = route.base_url
+        command = [
+            resolve_claude_bin(claude_bin),
+            "-p",
+            "--model",
+            current_model,
+            "--disable-slash-commands",
+        ]
+        if prompt_file:
+            command.extend(["--append-system-prompt-file", prompt_file])
         try:
-            text, openai_model = _openai_result(
-                system_prompt,
-                prompt,
-                allow_tools=allow_tools,
-                timeout=max(1, int(remaining)),
-                root=root_path,
+            command.extend(_session_args(
+                session_args,
+                attempt_index[0],
+                session_registrar,
+            ))
+        except RuntimeError:
+            return AdapterResult(
+                status="rejected",
+                reason="unregistered_provider_session",
+                effects_started=False,
+            )
+        attempt_index[0] += 1
+        if request.allow_tools:
+            command.append("--dangerously-skip-permissions")
+        else:
+            command.extend([
+                "--permission-mode", "dontAsk", "--tools", "",
+                "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config",
+            ])
+        try:
+            completed = _invoke(
+                command,
+                request.prompt,
+                timeout=attempt_timeout,
+                cwd=str(work_dir or root_path),
+                env=provider_env,
+                runner=runner,
                 process_holder=process_holder,
                 process_key=process_key,
                 cancelled=cancelled,
             )
-        except Exception:
-            text, openai_model = "", ""
-        if cancelled is not None and cancelled():
-            return AuxiliaryModelResult(attempted=tuple(attempted))
-        if text and not looks_like_error(text, proactive=True):
-            return AuxiliaryModelResult(
-                text=text,
-                provider="GPT fallback",
-                model=openai_model,
-                attempted=tuple(attempted),
+        except subprocess.TimeoutExpired:
+            return AdapterResult(
+                status="transport_failure",
+                reason="timeout",
+                effects_started=(None if request.allow_tools else False),
             )
-        return AuxiliaryModelResult(attempted=tuple(attempted))
+        except OSError:
+            return AdapterResult(
+                status="preexecution_failure",
+                reason="cli_unavailable",
+                effects_started=False,
+            )
+        if cancelled is not None and cancelled():
+            return AdapterResult(status="cancelled", reason="cancelled")
+        text = (completed.stdout or "").strip()
+        error_text = "\n".join(
+            part for part in (completed.stderr or "", completed.stdout or "")
+            if part
+        )
+        if (
+            completed.returncode == 0
+            and text
+            and not looks_like_error(text, proactive=True)
+        ):
+            return AdapterResult(
+                status="succeeded", text=text, observed_model=current_model,
+            )
+        account_reason = limit_reason(error_text)
+        if route.id == "primary" and account_reason:
+            try:
+                trip(account_reason, root_path)
+            except Exception:
+                pass
+        next_model = fallback_for_stderr(current_model, error_text) or ""
+        reason = reason_code_for_error(error_text)
+        if completed.returncode in {137, 143}:
+            status = "cancelled" if (cancelled and cancelled()) else (
+                "ambiguous_failure"
+            )
+        elif request.allow_tools:
+            # Once a tool-capable CLI process has run, stderr cannot prove
+            # whether an earlier model round already caused a local effect.
+            status = "ambiguous_failure"
+        elif is_preexecution_error(error_text) or reason in {
+            "account_limit", "auth_error", "rate_limited", "server_overloaded",
+        }:
+            status = "preexecution_failure"
+        elif reason in {"network_error", "server_error", "timeout"}:
+            status = "transport_failure"
+        else:
+            status = "ambiguous_failure"
+        return AdapterResult(
+            status=status,
+            reason=reason,
+            effects_started=(
+                False if status == "preexecution_failure"
+                else (None if request.allow_tools else False)
+            ),
+            next_model=next_model,
+        )
+
+    def openai_adapter(route, request, current_model, attempt_timeout):
+        if cancelled is not None and cancelled():
+            return AdapterResult(
+                status="cancelled", reason="cancelled", effects_started=False,
+            )
+        try:
+            text, observed = _openai_result(
+                request.system_prompt,
+                request.prompt,
+                allow_tools=request.allow_tools,
+                timeout=max(1, int(attempt_timeout)),
+                root=root_path,
+                process_holder=process_holder,
+                process_key=process_key,
+                cancelled=cancelled,
+                route=route,
+                model_override=current_model,
+            )
+        except Exception as exc:
+            reason = reason_code_for_error(str(exc))
+            if request.allow_tools:
+                # The agentic loop may fail on a later API round after one or
+                # more local tools completed. The exception text alone cannot
+                # certify a pre-execution failure.
+                status = "ambiguous_failure"
+            elif is_preexecution_error(str(exc)) or reason in {
+                "account_limit", "auth_error", "rate_limited", "server_overloaded",
+            }:
+                status = "preexecution_failure"
+            elif reason in {"network_error", "server_error", "timeout"}:
+                status = "transport_failure"
+            else:
+                status = "ambiguous_failure"
+            return AdapterResult(
+                status=status,
+                reason=reason,
+                effects_started=(
+                    False if status == "preexecution_failure"
+                    else (None if request.allow_tools else False)
+                ),
+            )
+        if cancelled is not None and cancelled():
+            return AdapterResult(status="cancelled", reason="cancelled")
+        if text and not looks_like_error(text, proactive=True):
+            return AdapterResult(
+                status="succeeded", text=text, observed_model=observed,
+            )
+        return AdapterResult(
+            status="ambiguous_failure",
+            reason="empty_or_error_output",
+            effects_started=(None if request.allow_tools else False),
+        )
+
+    derived_task_id = str(task_id or "").strip() or (
+        f"auxiliary:{process_key}:"
+        + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+    )
+    requested_model = model if model in {"haiku", "sonnet"} else ""
+    authority = effect_authority or (
+        "workspace_write" if allow_tools else "none"
+    )
+    try:
+        runtime = execute(
+            RuntimeRequest(
+                task_id=derived_task_id,
+                matter_id=matter_id,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                context="auxiliary_trusted",
+                requested_model=requested_model,
+                gate_state=gate_state,
+                effect_authority=authority,
+                allow_tools=allow_tools,
+                timeout_seconds=timeout,
+                workspace=str(work_dir or root_path),
+            ),
+            {
+                "claude_cli": claude_adapter,
+                "openai_responses": openai_adapter,
+            },
+            root=root_path,
+            config=Config(root_path / "jarvis.yaml"),
+            health_rows=_provider_health_rows(root_path),
+        )
+        if runtime.terminal_reason == "unregistered_provider_session":
+            raise RuntimeError("refusing unregistered provider retry session")
+        labels = {
+            route.id: route.label
+            for route in model_routes(Config(root_path / "jarvis.yaml"))
+        }
+        return AuxiliaryModelResult(
+            text=runtime.text,
+            provider=labels.get(runtime.route_id, ""),
+            model=runtime.observed_model or runtime.requested_model,
+            attempted=tuple(
+                f"{labels.get(item.route_id, item.route_id)}:"
+                f"{item.requested_model}"
+                for item in runtime.attempts
+            ),
+            call_id=runtime.call_id,
+            status=runtime.status,
+            terminal_reason=runtime.terminal_reason,
+        )
     finally:
         if prompt_file:
             try:
@@ -519,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--metadata-file", default="")
     parser.add_argument("--managed-job-id", default="")
     parser.add_argument("--jobs-dir", default=os.environ.get("JV_JOBS_DIR", ""))
+    parser.add_argument("--task-id", default="")
+    parser.add_argument("--matter-id", default="")
     args = parser.parse_args(argv)
 
     root = args.root or Path(__file__).resolve().parent.parent
@@ -579,6 +599,12 @@ def main(argv: list[str] | None = None) -> int:
             session_registrar=session_registrar,
             process_holder=process_holder,
             cancelled=lambda: bool(termination_signal[0]),
+            task_id=(
+                args.task_id
+                or (f"job:{args.managed_job_id}" if args.managed_job_id else "")
+                or "auxiliary:cli"
+            ),
+            matter_id=args.matter_id,
         )
     finally:
         _terminate_process_group(process_holder.get("model"))

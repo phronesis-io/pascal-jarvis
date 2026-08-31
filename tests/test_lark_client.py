@@ -18,11 +18,10 @@ def test_reaction_removal_has_a_hard_wall_clock_bound(tmp_path):
     invocation = tmp_path / "invocation"
     fake_cli = fake_bin / "lark-cli"
     fake_cli.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, pathlib, signal, time\n"
-        "pathlib.Path(os.environ['INVOCATION']).write_text('called')\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "time.sleep(30)\n",
+        "#!/bin/sh\n"
+        "printf called > \"$INVOCATION\"\n"
+        "trap '' TERM\n"
+        "/bin/sleep 30\n",
         encoding="utf-8",
     )
     fake_cli.chmod(0o755)

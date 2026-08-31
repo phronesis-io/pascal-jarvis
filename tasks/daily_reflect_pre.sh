@@ -4,6 +4,10 @@
 
 JARVIS_DIR="${JARVIS_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 MEMORY_DIR="${MEMORY_DIR:-$HOME/.jarvis/memory}"
+if ! PYTHONPATH="$JARVIS_DIR" JARVIS_DIR="$JARVIS_DIR" \
+    python3 -m core.retained_rhythms enabled daily_reflect >/dev/null 2>&1; then
+  exit 0
+fi
 
 # Load configurable time windows from jarvis.yaml
 eval $(bash "$JARVIS_DIR/scripts/config_env.sh" 2>/dev/null) || true

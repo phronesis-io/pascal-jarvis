@@ -76,7 +76,9 @@ def test_localtest_normal_mode_keeps_strict_full_suite(tmp_path):
         check=True,
     )
 
-    assert "-m pytest tests/" in calls.read_text(encoding="utf-8")
+    invoked = calls.read_text(encoding="utf-8")
+    assert "-m coverage run -m pytest tests/" in invoked
+    assert "scripts/coverage_budget.py" in invoked
 
 
 def test_localtest_runtime_mode_rejects_discarded_pytest_arguments(tmp_path):
@@ -175,9 +177,13 @@ def test_setup_installs_and_verifies_the_complete_dependency_set():
     assert "pywebpush" not in runtime_requirements
     assert "qrcode" not in runtime_requirements
     assert "lark_oapi" in script
+    assert '"pytest", "coverage"' in script
     assert "pip check" in script
     assert "sys.version_info >= (3, 10)" in script
     assert "pytest>=8.0" in requirements
+    assert "coverage>=7.10,<8" in requirements
+    assert '"$JARVIS_DIR/scripts/localtest.sh"' in script
+    assert '"$JARVIS_PYTHON" -m pytest tests/ -q' not in script
     assert "chmod -x scripts/config_env.sh scripts/runtime_env.sh" in script
     assert "need_cmd python3" not in script
 

@@ -103,9 +103,9 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
         RESTART_SH.index('case "${1:-}"')
     ]
     assert full.index("\n  confirm_restart") < full.index(
-        "\n  prepare_codex_frontstage"
+        "\n  if ! verify_codex_frontstage"
     )
-    assert full.index("\n  prepare_codex_frontstage") < full.index(
+    assert full.index("\n  if ! verify_codex_frontstage") < full.index(
         "\n  refresh_launchd_definitions"
     )
     assert full.index("\n  refresh_launchd_definitions") < full.index(
@@ -122,23 +122,26 @@ def test_full_restart_refreshes_definitions_and_verifies_all_runtimes():
         "record_release_receipt governed")
 
 
-def test_governed_deploy_prepares_codex_before_stopping_runtime():
-    """A green daemon is not a release if the primary Codex surface is stale."""
+def test_governed_deploy_read_only_checks_codex_without_blocking_runtime():
+    """Frontstage degradation is visible but never blocks resident recovery."""
     prepare = RESTART_SH[
-        RESTART_SH.index("prepare_codex_frontstage()"):
+        RESTART_SH.index("verify_codex_frontstage()"):
         RESTART_SH.index("# ── Main")
     ]
     assert 'version("mcp")' in prepare
-    assert '"mcp>=2,<3"' in prepare
-    assert "scripts/install_codex_integration.sh" in prepare
+    assert "pip install" not in prepare
+    assert "scripts/install_codex_integration.sh" not in prepare
     assert "scripts/check_codex_frontstage.py" in prepare
     assert "jarvis-matters@pascal-jarvis" in prepare
+    assert "plugin list --json" in prepare
 
     full = RESTART_SH[
         RESTART_SH.index("governed_deploy()"):
         RESTART_SH.index('case "${1:-}"')
     ]
-    assert full.index("prepare_codex_frontstage") < full.index("kill_bot")
+    assert "if ! verify_codex_frontstage; then" in full
+    assert "continuing the resident Jarvis release" in full
+    assert full.index("verify_codex_frontstage") < full.index("kill_bot")
 
     verify = RESTART_SH[
         RESTART_SH.index("verify_full_runtime()"):
@@ -147,6 +150,16 @@ def test_governed_deploy_prepares_codex_before_stopping_runtime():
     assert "python3 -m core.deploy verify" in verify
     assert 'verify_args+=(--require "$component")' in verify
     assert '"${verify_args[@]}"' in verify
+
+
+def test_setup_owns_mutating_codex_installation():
+    setup = (ROOT / "setup.sh").read_text(encoding="utf-8")
+
+    assert "scripts/install_codex_integration.sh" in setup
+    assert "scripts/check_codex_frontstage.py" in setup
+    assert setup.index("pip install -r requirements-dev.txt") < setup.index(
+        "scripts/install_codex_integration.sh"
+    )
 
 
 def test_default_release_and_full_alias_share_the_complete_deploy_path():

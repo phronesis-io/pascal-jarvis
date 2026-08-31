@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.frontstage_acceptance import CONNECTOR_VERSION
+from core.operating_model import operating_model
 from core.codex_frontstage import (
     abort_matter_run,
     claim_frontstage_feedback_prompt,
@@ -27,21 +29,26 @@ from core.codex_frontstage import (
 SERVER_INSTRUCTIONS = """
 Jarvis is the durable backstage, not a competing chat interface. Use a Matter
 only for work that must survive tasks, devices, time, or execution providers.
+The owner starts ordinary questions, research, writing, coding, files and long
+review in Codex. Jarvis talks first only for time, material external change,
+an entrusted result, retained companion rhythm, or an owner-only boundary after
+it completed reversible work. Quiet is healthy when no result is owed. Git and
+GitHub own code history and review; Lark owns bounded wake-up and native work.
 Acquire before doing Matter work, preserve the returned context generation and
 digest, and release every run. A Result Receipt never completes the Matter.
 External effects require trusted Delegation evidence; model prose is not proof.
-Compiled memory is read-only unless Pascal has explicitly reviewed a named
+Compiled memory is read-only unless the owner has explicitly reviewed a named
 claim in the current conversation. Never infer approval or invent a reviewer.
 For package usage, report numeric allowance only from exact quota evidence.
 A login, configured credential, or successful canary is not remaining quota;
 show unknown when a provider exposes no supported read surface.
-Use the one-step continuation tool when Pascal naturally asks to resume durable
-work. Close only when Pascal explicitly says that named Matter is complete;
+Use the one-step continuation tool when the owner naturally asks to resume durable
+work. Close only when the owner explicitly says that named Matter is complete;
 pass his exact words as owner_confirmation and never infer them from executor
 prose, tests, exit codes, or artifacts.
 After a successfully released desktop/mobile continuation, call the feedback
 prompt tool once. Show its prompt only when should_ask is true. Record feedback
-only when Pascal's current message is exactly one or more published labels;
+only when the owner's current message is exactly one or more published labels;
 never infer acceptance from silence, praise, completion evidence, or your own
 assessment, and never rephrase his owner confirmation.
 """.strip()
@@ -69,8 +76,17 @@ def create_server():
         title="Jarvis Matters",
         description="Durable Matter continuity for Codex and other frontstages.",
         instructions=SERVER_INSTRUCTIONS,
-        version="0.3.1",
+        version=CONNECTOR_VERSION,
     )
+
+    @server.tool(
+        name="jarvis_operating_model",
+        annotations=readonly,
+        structured_output=True,
+    )
+    def get_operating_model() -> dict[str, Any]:
+        """Explain when to use Codex, Jarvis, or direct Lark interaction."""
+        return operating_model()
 
     @server.tool(
         name="jarvis_matter_search",
@@ -94,6 +110,7 @@ def create_server():
         matter_id: str = "",
         query: str = "",
         task_ref: str = "",
+        wake_id: str = "",
         model: str = "",
         surface: str = "",
         lease_seconds: int = 21600,
@@ -105,6 +122,7 @@ def create_server():
             matter_id=matter_id,
             query=query,
             task_ref=task_ref,
+            wake_id=wake_id,
             model=model,
             surface=surface,
             lease_seconds=lease_seconds,
@@ -136,9 +154,14 @@ def create_server():
         annotations=readonly,
         structured_output=True,
     )
-    def get_status(matter_id: str) -> dict[str, Any]:
-        """Read current Matter state, active lease and recent audit events."""
-        return matter_status(matter_id)
+    def get_status(
+        matter_id: str, include_conversation_events: bool = False,
+    ) -> dict[str, Any]:
+        """Read state; conversation excerpts are excluded unless requested."""
+        return matter_status(
+            matter_id,
+            include_conversation_events=include_conversation_events,
+        )
 
     @server.tool(
         name="jarvis_matter_start",
@@ -232,7 +255,7 @@ def create_server():
     def matter_close(
         matter_id: str, outcome: str, owner_confirmation: str,
     ) -> dict[str, Any]:
-        """Close a Matter only after Pascal explicitly confirms completion."""
+        """Close a Matter only after the owner explicitly confirms completion."""
         return close_frontstage_matter(
             matter_id=matter_id,
             outcome=outcome,
@@ -282,7 +305,7 @@ def create_server():
         structured_output=True,
     )
     def acceptance_record(run_id: str, feedback: str) -> dict[str, Any]:
-        """Record Pascal's exact published feedback label for one prompted run."""
+        """Record the owner's exact published feedback label for one prompted run."""
         return record_frontstage_feedback(run_id, feedback)
 
     @server.tool(
@@ -315,7 +338,7 @@ def create_server():
     def memory_review(
         claim_id: str, action: str, reviewer: str,
     ) -> dict[str, Any]:
-        """Apply Pascal's explicit current-conversation review to one claim."""
+        """Apply the owner's explicit current-conversation review to one claim."""
         return review_memory_claim(
             claim_id=claim_id, action=action, reviewer=reviewer,
         )

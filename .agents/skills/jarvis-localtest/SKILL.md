@@ -1,6 +1,6 @@
 ---
 name: jarvis-localtest
-description: Validate Pascal Jarvis changes from focused tests through production runtime smoke checks.
+description: Validate the owner Jarvis changes from focused tests through production runtime smoke checks.
 metadata:
   internal: true
 ---
