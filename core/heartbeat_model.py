@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -72,6 +73,7 @@ def run_heartbeat_model(
     allow_tools: bool = False,
     restrict_tools: bool = False,
     primary_only: bool = False,
+    private_fallback: str = "",
     gate_state: str = "primary",
     prompt_builder: PromptBuilder,
     runner: Runner,
@@ -89,12 +91,23 @@ def run_heartbeat_model(
     # here as well as in HeartbeatRunner.
     allow_tools = False
     requested = str(requested_model or "").strip().lower()
-    if primary_only:
+    private_fallback = str(private_fallback or "").strip().lower()
+    if private_fallback not in {"", "codex"}:
+        raise ValueError("unsupported private heartbeat fallback")
+    if primary_only and private_fallback:
+        raise ValueError("primary_only conflicts with private fallback")
+    if private_fallback == "codex":
+        route_ids = ("primary", "codex")
+        runtime_context = "heartbeat_private"
+    elif primary_only:
         route_ids = ("primary",)
+        runtime_context = "heartbeat"
     elif requested == "gpt":
         route_ids = ("openai",)
+        runtime_context = "heartbeat"
     else:
         route_ids = ("primary", "backup1", "backup2", "openai")
+        runtime_context = "heartbeat"
     if primary_only:
         runtime_model = (
             requested
@@ -305,11 +318,99 @@ def run_heartbeat_model(
             effects_started=(None if request.allow_tools else False),
         )
 
+    def codex_adapter(
+        route: ModelRoute,
+        request: RuntimeRequest,
+        current_model: str,
+        attempt_timeout: float,
+    ) -> AdapterResult:
+        nonlocal last_error_detail
+        from core.codex_fallback import (
+            CodexFallbackError,
+            CodexUnavailableError,
+            ensure_codex_authenticated,
+            invoke_codex,
+            resolve_codex_bin,
+        )
+
+        if request.allow_tools:
+            return AdapterResult(
+                status="ambiguous_failure",
+                reason="tool_policy_violation",
+                effects_started=None,
+            )
+        binary = resolve_codex_bin(route.binary)
+        if not binary:
+            last_error_detail = "Codex CLI not found"
+            return AdapterResult(
+                status="preexecution_failure",
+                reason="cli_unavailable",
+                effects_started=False,
+            )
+        system_prompt, request_prompt = prompt_builder(route)
+        prompt = (
+            "You are the private, read-only Codex fallback inside Jarvis. "
+            "Use only the supplied context. Do not inspect local files, run "
+            "commands, or create side effects. Return only the requested "
+            "structured result. This execution is ephemeral and must not "
+            "rely on an earlier thread.\n\n"
+            "=== JARVIS CONTEXT ===\n"
+            f"{system_prompt.strip()}\n\n"
+            "=== PRIVATE TASK ===\n"
+            f"{request_prompt.strip()}"
+        )
+        try:
+            ensure_codex_authenticated(binary)
+            with tempfile.TemporaryDirectory(
+                prefix="jarvis-private-codex-",
+            ) as empty_work_dir:
+                result = invoke_codex(
+                    prompt=prompt,
+                    thread_id="",
+                    model=current_model,
+                    timeout=max(
+                        1, int(bounded_timeout(route, attempt_timeout))
+                    ),
+                    work_dir=empty_work_dir,
+                    binary=binary,
+                    allow_tools=False,
+                    ephemeral=True,
+                )
+        except CodexUnavailableError as exc:
+            last_error_detail = safe_error_detail(str(exc))
+            return AdapterResult(
+                status="preexecution_failure",
+                reason="cli_unavailable",
+                effects_started=False,
+            )
+        except CodexFallbackError as exc:
+            last_error_detail = safe_error_detail(str(exc))
+            reason = provider_reason(str(exc))
+            return AdapterResult(
+                status=(
+                    "transport_failure"
+                    if reason in TRANSPORT_REASONS
+                    else "ambiguous_failure"
+                ),
+                reason=reason,
+                effects_started=False,
+            )
+        text = str(result.text or "").strip()
+        if text and not looks_like_error(text, proactive=True):
+            return AdapterResult(
+                status="succeeded", text=text, observed_model=current_model,
+            )
+        return AdapterResult(
+            status="ambiguous_failure",
+            reason="empty_or_error_output",
+            effects_started=False,
+        )
+
     runtime = execute(
         RuntimeRequest(
             task_id=task_id,
             prompt=logical_prompt,
-            context="heartbeat",
+            context=runtime_context,
             requested_model=runtime_model,
             route_ids=route_ids,
             gate_state=gate_state,
@@ -320,6 +421,7 @@ def run_heartbeat_model(
         ),
         {
             "claude_cli": claude_adapter,
+            "codex_cli": codex_adapter,
             "openai_responses": openai_adapter,
         },
         root=base,

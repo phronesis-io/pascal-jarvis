@@ -137,7 +137,10 @@ def build_command(
     output_file: str | Path,
     thread_id: str = "",
     allow_tools: bool = True,
+    ephemeral: bool = False,
 ) -> list[str]:
+    if ephemeral and thread_id:
+        raise ValueError("ephemeral Codex execution cannot resume a thread")
     common = [
         "--json",
         "--skip-git-repo-check",
@@ -153,6 +156,8 @@ def build_command(
         # thread. The subcommand intentionally exposes no -C/sandbox options.
         return [binary, "exec", "resume", *common, thread_id, "-"]
     command = [binary, "exec", "--color", "never"]
+    if ephemeral:
+        command.append("--ephemeral")
     if allow_tools:
         # Automatic approval review stays inside Codex's workspace-write
         # sandbox. Never use the dangerous bypass flag in the resident bot.
@@ -307,6 +312,7 @@ def invoke_codex(
     work_dir: str | Path,
     binary: str,
     allow_tools: bool,
+    ephemeral: bool = False,
     process_holder: dict[str, Any] | None = None,
 ) -> CliResult:
     output_handle = tempfile.NamedTemporaryFile(
@@ -321,6 +327,7 @@ def invoke_codex(
         output_file=output_path,
         thread_id=thread_id,
         allow_tools=allow_tools,
+        ephemeral=ephemeral,
     )
     process: subprocess.Popen[str] | None = None
     try:

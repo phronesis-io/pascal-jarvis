@@ -49,6 +49,7 @@ def test_parse_heartbeat_basic(tmp_path):
     assert tasks[0]["timeout"] is None
     assert tasks[0]["no_tools"] is False
     assert tasks[0]["private"] is False
+    assert tasks[0]["private_fallback"] == ""
     assert tasks[0]["model"] is None
     assert tasks[0]["memory_purpose"] == "inbound"
 
@@ -147,14 +148,20 @@ def test_parse_heartbeat_untrusted_input_field(tmp_path):
 def test_parse_heartbeat_private_field(tmp_path):
     hb = tmp_path / "HEARTBEAT.md"
     hb.write_text(
-        "### memory\n- private: true\n- prompt: compile\n\n"
+        "### memory\n- private: true\n- private-fallback: codex\n"
+        "- prompt: compile\n\n"
+        "### invalid\n- private: true\n- private-fallback: relay\n"
+        "- prompt: inspect\n\n"
         "### public\n- prompt: inspect\n"
     )
 
     by_name = {task["name"]: task for task in parse_heartbeat(hb)}
 
     assert by_name["memory"]["private"] is True
+    assert by_name["memory"]["private_fallback"] == "codex"
+    assert by_name["invalid"]["private_fallback"] == ""
     assert by_name["public"]["private"] is False
+    assert by_name["public"]["private_fallback"] == ""
 
 
 def test_parse_heartbeat_no_tools_field(tmp_path):
@@ -192,6 +199,7 @@ def test_production_task_model_policy_and_outbound_privacy():
                  "phronesis-monitor", "repos-sync", "activity-log"):
         assert tasks[name]["model"] == "sonnet"
     assert tasks["cross-session-sync"]["private"] is True
+    assert tasks["cross-session-sync"]["private_fallback"] == "codex"
     implicit = {
         name for name, task in tasks.items()
         if task["model"] is None
@@ -944,6 +952,32 @@ def test_private_task_isolated_and_reaches_primary_only_model_policy(
         if event["event"] == "task_spawn" and event["task"] == "memory"
     )
     assert spawn["isolation"] == "private-primary"
+
+
+def test_private_codex_fallback_is_explicit_and_does_not_enable_relays(
+        tmp_path, monkeypatch):
+    runner = _make_runner(
+        tmp_path,
+        "### memory\n- interval: 1h\n- model: sonnet\n"
+        "- private: true\n- private-fallback: codex\n"
+        "- prompt: compile private memory\n",
+    )
+    captured = []
+
+    def _fake_call(prompt, **kwargs):
+        captured.append((prompt, kwargs))
+        return "HEARTBEAT_OK"
+
+    monkeypatch.setattr(runner, "claude_call", _fake_call)
+    runner.run_cycle(force=True)
+
+    assert len(captured) == 1
+    assert captured[0][1]["private_fallback"] == "codex"
+    assert "primary_only" not in captured[0][1]
+    events = [json.loads(line) for line in
+              (runner.jarvis_dir / "sched_events.jsonl").read_text().splitlines()]
+    spawn = next(event for event in events if event["event"] == "task_spawn")
+    assert spawn["isolation"] == "private-codex"
 
 
 def test_batch_uses_highest_declared_model(tmp_path, monkeypatch):

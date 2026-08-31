@@ -60,6 +60,14 @@ runner default. GPT is a provider route, not a Claude model alias, and always
 runs solo. A Claude batch selects the strongest explicitly declared tier in
 that batch. Requested lower tiers remain lower tiers through relays.
 
+`private: true` remains official-Primary-only by default. A task may opt into
+`private-fallback: codex`; that creates a separate `heartbeat_private` route
+whose complete order is official Claude Primary then the owner's direct Codex
+account. It never includes either relay or the OpenAI relay. Codex runs with a
+fresh ephemeral thread, read-only sandbox, and empty temporary working
+directory; its result still passes through the task's deterministic
+post-script.
+
 `untrusted-input: true` disables tools and withholds personal memory. Those
 tasks receive only an allowlisted `triage_profile` when relevance context is
 needed. `memory-purpose: outbound` forces an isolated no-tools call and loads

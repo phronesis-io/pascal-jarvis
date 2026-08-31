@@ -9,6 +9,7 @@ from pathlib import Path
 TASK_MODELS = {"opus", "sonnet", "haiku", "gpt"}
 TASK_MODEL_RANK = {"haiku": 1, "sonnet": 2, "gpt": 2, "opus": 3}
 MEMORY_PURPOSES = {"inbound", "outbound"}
+PRIVATE_FALLBACKS = {"codex"}
 
 
 def parse_interval(value: str) -> int:
@@ -34,6 +35,7 @@ def _new_task(name: str) -> dict:
         "timeout": None,
         "untrusted_input": False,
         "private": False,
+        "private_fallback": "",
         "no_tools": False,
         "full_memory": False,
         "model": None,
@@ -67,6 +69,11 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
             current["untrusted_input"] = _enabled(line)
         elif line.startswith("- private:"):
             current["private"] = _enabled(line)
+        elif line.startswith("- private-fallback:"):
+            value = line.split(":", 1)[1].strip().lower()
+            current["private_fallback"] = (
+                value if value in PRIVATE_FALLBACKS else ""
+            )
         elif line.startswith("- no-tools:"):
             current["no_tools"] = _enabled(line)
         elif line.startswith("- full-memory:"):
@@ -98,6 +105,10 @@ def parse_heartbeat(path: str | Path) -> list[dict]:
     if current:
         current.pop("_in_prompt", None)
         tasks.append(current)
+
+    for task in tasks:
+        if not task.get("private"):
+            task["private_fallback"] = ""
 
     overlay_dir = source.parent / "data" / "heartbeat_overlay"
     if overlay_dir.is_dir():
@@ -135,7 +146,11 @@ def policy_isolation_reason(task: dict) -> str:
     if not shared_batch_eligible(task):
         if (task.get("private") and not task.get("heavy")
                 and not task.get("untrusted_input") and not task.get("no_tools")):
-            return "private-primary"
+            return (
+                "private-codex"
+                if task.get("private_fallback") == "codex"
+                else "private-primary"
+            )
         if (task.get("model") == "gpt" and not task.get("heavy")
                 and not task.get("untrusted_input") and not task.get("no_tools")):
             return "model-route"

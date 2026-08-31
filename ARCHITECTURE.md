@@ -447,6 +447,12 @@ evidence before any deploy guard or runtime process is touched.
   restricted no-private-tools adapter path, so this is not yet a system-wide
   Phase-3 completion claim. Tiny canaries and real-workload health remain
   distinct signals.
+- Private heartbeat work remains official-Primary-only unless a task explicitly
+  declares `private-fallback: codex`. That narrower `heartbeat_private` context
+  contains only Primary and the owner's direct Codex account; relay routes are
+  structurally absent and write/external tool authority is forbidden. Codex
+  uses a fresh ephemeral read-only execution in an empty temporary directory
+  rather than a resumable Matter thread.
 - `core.owner_chat_model`: the owner-private Lark adapter boundary. `bot.sh`
   still owns trust classification, serialization, progress, background
   promotion, cancellation, actions, and delivery; one wrapper process gives

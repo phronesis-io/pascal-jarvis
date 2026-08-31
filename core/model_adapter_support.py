@@ -82,6 +82,9 @@ def bounded_timeout(route: ModelRoute, attempt_timeout: float) -> float:
     elif route.id == "openai":
         cap_name = "OPENAI_FALLBACK_TIMEOUT"
         default = 120
+    elif route.id == "codex":
+        cap_name = "CODEX_FALLBACK_TIMEOUT"
+        default = 300
     if not cap_name:
         return max(0.05, float(attempt_timeout))
     try:

@@ -525,6 +525,7 @@ duplicate the common style contract here.
 - interval: 10m
 - model: sonnet
 - private: true
+- private-fallback: codex
 - pre: tasks/cross_session_pre.sh
 - post: tasks/cross_session_post.py
 - prompt: |

@@ -28,6 +28,7 @@ CONTEXTS = {
     "owner_chat",
     "group",
     "heartbeat",
+    "heartbeat_private",
     "auxiliary_trusted",
     "auxiliary_untrusted",
 }
@@ -35,6 +36,10 @@ DEFAULT_ORDERS = {
     "owner_chat": ROUTE_IDS,
     "group": ("primary", "backup1", "backup2", "openai"),
     "heartbeat": ("primary", "backup1", "backup2", "openai"),
+    # Private unattended compilation may use the owner's direct ChatGPT/Codex
+    # account, but never either relay route. The caller additionally enforces
+    # an ephemeral read-only Codex process.
+    "heartbeat_private": ("primary", "codex"),
     "auxiliary_trusted": ("primary", "backup1", "backup2", "openai"),
     "auxiliary_untrusted": ("primary", "backup1", "backup2", "openai"),
 }
