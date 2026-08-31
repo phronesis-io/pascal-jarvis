@@ -629,7 +629,7 @@ class HeartbeatRunner:
                      "If nothing needs attention, reply with exactly: HEARTBEAT_OK")
         prompt = "\n".join(parts)
 
-        self._log(f"Calling Claude SOLO for {isolation_reason} task {name} "
+        self._log(f"Calling model SOLO for {isolation_reason} task {name} "
                   f"(timeout {timeout}s)...")
         self._event("task_spawn", task=name, heavy=is_heavy,
                     isolation=isolation_reason)
@@ -642,7 +642,11 @@ class HeartbeatRunner:
         if task.get("memory_purpose") != "inbound":
             call_kwargs["memory_purpose"] = task["memory_purpose"]
         if task.get("private"):
-            call_kwargs["primary_only"] = True
+            private_fallback = str(task.get("private_fallback") or "")
+            if private_fallback:
+                call_kwargs["private_fallback"] = private_fallback
+            else:
+                call_kwargs["primary_only"] = True
         previous_task_id = self._model_task_id
         self._model_task_id = f"heartbeat:{name}"
         try:
@@ -952,6 +956,7 @@ class HeartbeatRunner:
                     requested_model: str | None = None,
                     memory_purpose: str = "inbound",
                     primary_only: bool = False,
+                    private_fallback: str = "",
                     task_id: str = "") -> str:
         """Run one heartbeat request through the shared Model Runtime.
 
@@ -1039,6 +1044,7 @@ class HeartbeatRunner:
             allow_tools=runtime_allow_tools,
             restrict_tools=restrict_tools,
             primary_only=primary_only,
+            private_fallback=private_fallback,
             gate_state=gate_state,
             prompt_builder=prompt_for_route,
             runner=_run_isolated,

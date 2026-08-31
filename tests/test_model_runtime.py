@@ -116,6 +116,27 @@ def test_transport_failure_replays_only_when_effects_are_safe(tmp_path):
     assert routes == ["primary"]
 
 
+def test_private_heartbeat_context_cannot_enable_tools(tmp_path):
+    try:
+        execute(
+            RuntimeRequest(
+                task_id="private-tools",
+                prompt="x",
+                context="heartbeat_private",
+                allow_tools=True,
+                effect_authority="workspace_write",
+            ),
+            {},
+            root=tmp_path,
+            config=_config(tmp_path),
+            observer=lambda *_args: None,
+        )
+    except ValueError as exc:
+        assert "does not permit tools" in str(exc)
+    else:
+        raise AssertionError("private heartbeat context received tools")
+
+
 def test_ambiguous_network_failure_still_marks_provider_unhealthy(tmp_path):
     observed = []
 

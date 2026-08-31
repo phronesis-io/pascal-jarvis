@@ -51,6 +51,28 @@ def test_new_command_uses_workspace_review_without_sandbox_bypass(tmp_path):
     assert command[command.index("-C") + 1] == str(tmp_path)
 
 
+def test_ephemeral_read_only_command_cannot_resume_or_persist(tmp_path):
+    command = cf.build_command(
+        "/opt/codex", model="gpt-test", work_dir=tmp_path,
+        output_file=tmp_path / "answer.txt", thread_id="", allow_tools=False,
+        ephemeral=True,
+    )
+
+    assert command[:2] == ["/opt/codex", "exec"]
+    assert "--ephemeral" in command
+    assert command[command.index("--sandbox") + 1] == "read-only"
+    assert "resume" not in command
+    assert "--approve-for-me" not in command
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+
+    with pytest.raises(ValueError, match="cannot resume"):
+        cf.build_command(
+            "/opt/codex", model="gpt-test", work_dir=tmp_path,
+            output_file=tmp_path / "answer.txt", thread_id="thread-1",
+            allow_tools=False, ephemeral=True,
+        )
+
+
 def test_resume_command_inherits_the_original_sandbox(tmp_path):
     command = cf.build_command(
         "/opt/codex", model="gpt-test", work_dir=tmp_path,

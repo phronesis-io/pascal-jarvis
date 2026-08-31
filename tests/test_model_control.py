@@ -80,6 +80,9 @@ def test_route_plan_applies_context_preference_gate_and_tool_policy(tmp_path):
     gated = model_control.route_plan(
         "heartbeat", config=config, env={}, gate_state="backup"
     )
+    private = model_control.route_plan(
+        "heartbeat_private", config=config, env={}, gate_state="backup"
+    )
 
     assert [route.id for route in owner.routes] == [
         "codex", "primary", "backup1", "openai",
@@ -89,6 +92,11 @@ def test_route_plan_applies_context_preference_gate_and_tool_policy(tmp_path):
     assert group.allow_tools is False
     assert [route.id for route in gated.routes] == ["backup1", "openai"]
     assert gated.skipped["primary"] == "account_gate"
+    assert [route.id for route in private.routes] == ["codex"]
+    assert private.allow_tools is False
+    assert private.skipped["primary"] == "account_gate"
+    assert "backup1" not in [route.id for route in private.routes]
+    assert "openai" not in [route.id for route in private.routes]
 
     forced_group = model_control.route_plan(
         "group", config=config, env={}, route_ids=("codex", "openai")

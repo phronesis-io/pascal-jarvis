@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from core.config import Config
 from core.heartbeat_model import run_heartbeat_model
@@ -268,6 +269,123 @@ def test_private_heartbeat_waits_when_account_gate_disables_primary(tmp_path):
     assert calls == []
     assert prompts == []
     assert result_attempts(result.call_id) == []
+
+
+def test_private_heartbeat_uses_ephemeral_read_only_codex_not_relays(
+        tmp_path, monkeypatch):
+    from core import codex_fallback
+
+    config = _config(tmp_path)
+    config._raw["codex"].update({
+        "fallback_enabled": True,
+        "fallback_model": "gpt-private",
+        "binary": "/opt/codex",
+    })
+    prompts = []
+    claude_calls = []
+    codex_calls = []
+
+    monkeypatch.setattr(
+        codex_fallback, "ensure_codex_authenticated", lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        codex_fallback, "resolve_codex_bin", lambda configured="": configured,
+    )
+
+    def invoke(**kwargs):
+        codex_calls.append(kwargs)
+        return codex_fallback.CliResult(text="compiled", thread_id="unused")
+
+    monkeypatch.setattr(codex_fallback, "invoke_codex", invoke)
+
+    def claude_runner(command, **kwargs):
+        claude_calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command, 1, "", "You've hit your weekly limit",
+        )
+
+    result = run_heartbeat_model(
+        "private memory batch",
+        task_id="heartbeat:private-memory-codex",
+        root=tmp_path,
+        work_dir=tmp_path,
+        claude_bin="claude",
+        default_model="opus",
+        requested_model="sonnet",
+        timeout=30,
+        allow_tools=False,
+        private_fallback="codex",
+        gate_state="primary",
+        prompt_builder=_prompt_builder(prompts),
+        runner=claude_runner,
+        logger=lambda *_args, **_kwargs: None,
+        config=config,
+        health_rows=[],
+    )
+
+    assert result.status == "succeeded"
+    assert result.route_id == "codex"
+    assert result.model == "gpt-private"
+    assert result.text == "compiled"
+    assert prompts == ["primary", "codex"]
+    assert len(claude_calls) == 1
+    assert "ANTHROPIC_AUTH_TOKEN" not in claude_calls[0][1]["env"]
+    assert len(codex_calls) == 1
+    assert codex_calls[0]["thread_id"] == ""
+    assert codex_calls[0]["binary"] == "/opt/codex"
+    assert codex_calls[0]["allow_tools"] is False
+    assert codex_calls[0]["ephemeral"] is True
+    assert codex_calls[0]["work_dir"] != tmp_path
+    assert "jarvis-private-codex-" in str(codex_calls[0]["work_dir"])
+    assert not Path(codex_calls[0]["work_dir"]).exists()
+    assert [item["route_id"] for item in result_attempts(result.call_id)] == [
+        "primary", "codex",
+    ]
+
+
+def test_private_codex_failure_never_falls_through_to_a_relay(
+        tmp_path, monkeypatch):
+    from core import codex_fallback
+
+    config = _config(tmp_path)
+    config._raw["codex"].update({
+        "fallback_enabled": True,
+        "fallback_model": "gpt-private",
+        "binary": "/opt/codex",
+    })
+    monkeypatch.setattr(
+        codex_fallback, "ensure_codex_authenticated",
+        lambda *_args: (_ for _ in ()).throw(
+            codex_fallback.CodexUnavailableError("not logged in")
+        ),
+    )
+    claude_calls = []
+
+    result = run_heartbeat_model(
+        "private memory batch",
+        task_id="heartbeat:private-memory-no-relay",
+        root=tmp_path,
+        work_dir=tmp_path,
+        claude_bin="claude",
+        default_model="opus",
+        requested_model="sonnet",
+        timeout=30,
+        allow_tools=False,
+        private_fallback="codex",
+        gate_state="backup",
+        prompt_builder=lambda _route: ("system", "request"),
+        runner=lambda *args, **kwargs: claude_calls.append((args, kwargs)),
+        logger=lambda *_args, **_kwargs: None,
+        config=config,
+        health_rows=[],
+    )
+
+    assert result.status == "failed"
+    assert result.terminal_reason == "cli_unavailable"
+    assert claude_calls == []
+    assert [item["route_id"] for item in result_attempts(result.call_id)] == [
+        "codex",
+    ]
 
 
 def test_interrupted_tool_process_maps_to_killed_without_fallback(tmp_path):
