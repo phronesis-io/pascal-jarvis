@@ -101,5 +101,19 @@ perception:
         rules:                 # optional anomaly rules, checked every collect
           - { metric: new_today, op: "<=", value: 0, min_hour: 14 }
           - { metric: dau_yesterday, op: "<", pct_of_prev: 50 }
+        # Optional: when the rule on `metric` trips, metrics-digest runs a
+        # read-only investigation itself and puts the findings in the same
+        # card (which source families are down, dominant error, since when,
+        # one-line diagnosis) instead of asking whether it should go look.
+        # Channels are tried in order, each with its own timeout; if both
+        # fail the card says so in one line. See core/pgc_outage_probe.py.
+        # investigate:
+        #   metric: broken_first_party
+        #   prometheus_ssh_host: your-monitoring-host   # ssh alias; "" = local
+        #   prometheus_url: http://127.0.0.1:9090
+        #   prometheus_timeout: 12
+        #   metrics_ssh_host: your-crawl-host           # ssh alias; "" = local
+        #   metrics_url: http://127.0.0.1:9090/metrics
+        #   metrics_timeout: 15
       schedule: { interval: 30m }
       perceive: { buffer: inbox_ops.md }

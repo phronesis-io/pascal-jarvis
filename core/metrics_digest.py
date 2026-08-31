@@ -221,6 +221,12 @@ def main(jarvis_dir: str | Path | None = None,
     # snapshots via pending_ts, computed before this filter.
     records = [r for r in records if r.get("kind") != "snapshot"]
     records = filter_anomalies(jarvis_dir, records)
+    # 2026-08-13「下次直接去查别等了」: an anomaly whose source configures
+    # `investigate` gets its read-only investigation run HERE, and the
+    # findings travel inside the record (core/pgc_outage_probe.py).
+    from core import pgc_outage_probe
+    for rec in records:
+        pgc_outage_probe.attach(jarvis_dir, _metrics_dir(jarvis_dir), rec, now)
     absences = detect_absences(jarvis_dir, now)
     if not records and not absences:
         # Everything collected was a suppressed repeat → the task is skipped

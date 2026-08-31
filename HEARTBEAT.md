@@ -309,6 +309,13 @@ duplicate the common style contract here.
     digest was lost).
     - kind=anomaly → alert card: lead with what broke and the number, one
       line on likely impact, end with "👉 要我现在查就说一声".
+      EXCEPTION — a record carrying `investigation`: the system already went
+      and looked (2026-08-13「下次直接去查别等了」). The card body is
+      `investigation.card_body` copied VERBATIM (it is already ≤3 lines,
+      conclusion first, source names included); do not paraphrase it, do
+      not add numbers, and never end with「要我…查」— the answer is in the
+      body. If `investigation.ok` is false the body already says
+      「追查没跑通：<原因>」; keep that line as is.
     - kind=absence → missing-report alert card ("⚠️ <name> 日报缺席"): the
       probe produced no daily snapshot by expected_by — say data collection
       itself may be down (ssh/db/upstream), end with "👉 要我现在查就说一声".

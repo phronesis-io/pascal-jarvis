@@ -13,6 +13,18 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
 
 ## [Unreleased]
 
+### Added
+
+- 「一手源大面积断连」告警卡不再以「要我现在查就说一声」收尾（2026-08-13
+  口述「下次直接去查别等了」）：metrics-digest 的 pre-hook 自己跑只读追查
+  （`core/pgc_outage_probe.py`），卡里直接写哪几族源断了各多少、主要错误
+  是什么、从几点起、以及一句判断（同一条通道/代理/密钥出问题，还是各家源
+  各自坏）。通道按便宜程度排：监控主机的 Prometheus（一次 ssh，实测 3.6 s，
+  抓取主机死了也能答）→ 抓取主机自己的 /metrics → 都不通就一行「追查没跑
+  通：<原因>」。模型把结论改成散文时，post-hook 把探针原话放回同一张卡；
+  没有对应卡就单出一张「追查结果」。配置在 sources.yaml 的
+  `collect.investigate`（见 sources.example.yaml），不配则行为不变。
+
 ### Changed
 
 - 主动消息分道只剩一处规则（`core/interruption.py`）：决策、提醒、你交代的
