@@ -659,3 +659,23 @@ def test_external_p2p_uses_shared_context_not_personal_memory(tmp_path):
     assert "PUBLIC_COMPANY_CONTEXT" in prompt
     assert "PRIVATE_OWNER_MEMORY" not in prompt
     assert "Available Actions" not in prompt
+
+
+def test_owner_prompt_carries_the_codex_jarvis_contract(tmp_path):
+    """The owner asked 「什么时候需要你而不是 Codex」 in Codex on 8/27 and
+    8/28; the Lark assistant answers from the versioned contract."""
+    mem = tmp_path / "memory" / "hot"
+    mem.mkdir(parents=True)
+    (mem / "profile.md").write_text("x")
+    prompt = build_system_prompt(
+        jarvis_dir=str(tmp_path),
+        memory_dir=str(tmp_path / "memory"),
+        session_dir=str(tmp_path),
+        session_id="s",
+        conv_key="k",
+        now_ts="",
+        tracker_path=str(tmp_path / "tracker.json"),
+    )
+    assert "我和 Codex 的分工" in prompt
+    assert "我会实时找你的只有这几类" in prompt
+    assert "只进晨间锚点的一行汇总" in prompt

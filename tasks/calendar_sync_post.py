@@ -194,6 +194,43 @@ def format_change_lines(added: set, removed: set, cap: int = 5) -> list[str]:
     return lines
 
 
+def _within_days(mmdd: str, days: int) -> bool:
+    """True when 'MM/DD' resolves to today .. today+days (inclusive)."""
+    if not mmdd:
+        return False
+    try:
+        from core.timeutil import now_local
+        m, d = (int(x) for x in mmdd.split("/"))
+        today = now_local().date()
+        delta = (_nearby_date(m, d, today) - today).days
+        return 0 <= delta <= days
+    except (ValueError, IndexError):
+        return False
+
+
+_CHANGE_DATE_RE = re.compile(r"(\d{1,2}/\d{1,2})\(")
+
+
+def change_attention(body: str, near_days: int = 2) -> str:
+    """The attention class one calendar-change card deserves.
+
+    A 取消 or 改期 that lands within the next two days can cost the owner a
+    trip or a slot — that is the only calendar change worth an alert. A 新增
+    is almost always his own hand on the calendar echoed back (18 alert cards
+    in 14 days by 2026-08-31, every one 「新增」); it is a notice that waits
+    for the morning digest.
+    """
+    for line in str(body or "").splitlines():
+        head = line.strip()
+        if not head.startswith(("取消：", "改期：")):
+            continue
+        dates = _CHANGE_DATE_RE.findall(head)
+        target = dates[-1] if dates else ""
+        if target and _within_days(target, near_days):
+            return "alert"
+    return "notice"
+
+
 def change_card_bodies(lines: list[str]) -> list[str]:
     """Card bodies for a batch of calendar changes.
 
@@ -297,6 +334,7 @@ def main() -> int:
         print(build_card(
             "📅 日程变动", body, source="calendar-sync",
             work_receipt="读取日历快照、完成变更比对和重复事件过滤",
+            attention=change_attention(body),
         ))
     print(f"[calendar-sync] Notified {len(bodies)} card(s): "
           f"{'; '.join(lines)!r}", file=sys.stderr)

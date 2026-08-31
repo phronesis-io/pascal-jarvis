@@ -289,6 +289,8 @@ AMBIENT_SOURCES = {
     "cross-session-sync",
 }
 
+ATTENTION_CLASSES = {ATTENTION_NOTICE, ATTENTION_DECISION, ATTENTION_ALERT}
+
 ALERT_SOURCES = {
     "calendar-sync",
 }
@@ -424,14 +426,33 @@ def delivery_accepted(state: dict) -> bool:
     return str(state.get("delivery_status", "")) in ACCEPTED_DELIVERY_STATUSES
 
 
+def _pop_declared_attention(card: dict) -> str:
+    """Attention class a deterministic emitter declared via core.card
+    (``__jarvis_attention``); popped so the marker never reaches Lark."""
+    declared = str(card.pop("__jarvis_attention", "") or "")
+    return declared if declared in ATTENTION_CLASSES else ""
+
+
+def _attention_marker(attention: str) -> dict:
+    return {"__jarvis_attention": attention} if attention else {}
+
+
 def should_push_to_lark(state: dict) -> bool:
-    """Route first-principles owner needs to Lark; keep exhaust local."""
-    if state.get("owner_need"):
-        return evaluate_interruption(state)["lane"] == "lark"
-    if str(state.get("attention", "") or "") == ATTENTION_ALERT:
-        return True
-    return requires_decision(state) or str(
-        state.get("source", "")) not in AMBIENT_SOURCES
+    """Route first-principles owner needs to Lark; keep exhaust local.
+
+    One rule for every card, explicit or inferred (core.interruption): an
+    alert or a decision reaches Lark now; a notice reaches Lark only when it
+    is a retained companion rhythm, a batched decision digest, or the result
+    of work the owner asked for. A notice that merely reports an external
+    change (知道就行) waits in the ledger for the morning anchor's digest
+    line — the 2026-08-31 owner complaint was exactly these cards.
+    """
+    attention = str(state.get("attention", "") or "")
+    if not attention:
+        attention = (ATTENTION_DECISION if requires_decision(state)
+                     else ATTENTION_NOTICE)
+    return evaluate_interruption({**state, "attention": attention})["lane"] == "lark"
+
 
 
 _ALERT_RE = re.compile(
@@ -443,6 +464,16 @@ _ALERT_RE = re.compile(
 
 def _looks_like_alert(text: str) -> bool:
     return bool(_ALERT_RE.search(str(text or "")))
+
+
+def _prose_alert_attention(source: str, text: str, has_ask: bool,
+                           fallback_preset: str) -> str:
+    """Alert class inferred from a model-authored card's own words, only for
+    sources allowed to promote themselves and only on an ask-free FYI card."""
+    if (_can_infer_alert_from_prose(source) and _looks_like_alert(text)
+            and not has_ask and fallback_preset == "fyi"):
+        return ATTENTION_ALERT
+    return ""
 
 
 def _can_infer_alert_from_prose(source: str) -> bool:
@@ -2117,6 +2148,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
     # per-kind learning possible at all — before this every checkin was logged
     # as an undifferentiated `source=checkin`.
     context = str(card.pop("__jarvis_context", "") or context)
+    declared_attention = _pop_declared_attention(card)
     if _trusted_ledger_card_memorial_id(card):
         return json.dumps(card, ensure_ascii=False, separators=(",", ":"))
     if _card_memorial_id(card):
@@ -2190,6 +2222,7 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
                     block_card["__jarvis_work_receipt"] = (
                         structured_work_receipt
                     )
+                block_card.update(_attention_marker(declared_attention))
                 adopted = adopt_card(
                     source, json.dumps(block_card, ensure_ascii=False),
                     context=context, suppress_accepted=suppress_accepted,
@@ -2251,11 +2284,9 @@ def adopt_card(source: str, legacy_card_json: str, context: str = "",
             preset=None if (has_native_action or inline_options)
             else fallback_preset,
             context=context, send=False, extra_buttons=native_buttons,
-            attention=(ATTENTION_ALERT if _can_infer_alert_from_prose(source)
-                       and _looks_like_alert(f"{title}\n{matter}")
-                       and not has_native_action and not inline_options
-                       and fallback_preset == "fyi"
-                       else ""),
+            attention=declared_attention or _prose_alert_attention(
+                source, f"{title}\n{matter}",
+                has_native_action or bool(inline_options), fallback_preset),
         )
         state = get_memorial(mid) or {}
         if skip_ledger_only and not should_push_to_lark(state):

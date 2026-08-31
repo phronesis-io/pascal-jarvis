@@ -104,7 +104,8 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
                source: str = "",
                button_groups: list[list[dict]] | None = None,
                context: str = "",
-               work_receipt: str = "") -> str:
+               work_receipt: str = "",
+               attention: str = "") -> str:
     """Build a Lark interactive card JSON string (single line).
 
     Args:
@@ -194,6 +195,11 @@ def build_card(header: str, body: str, buttons: list[dict] | None = None,
     }
     if context:
         card["__jarvis_context"] = str(context)
+    # A deterministic emitter that knows its own attention class (calendar:
+    # 新增 is a notice, 取消 within two days is an alert) declares it here;
+    # ``core.memorial.adopt_card`` pops the marker so it never reaches Lark.
+    if str(attention or "") in {"notice", "decision", "alert"}:
+        card["__jarvis_attention"] = str(attention)
     if work_receipt:
         card["__jarvis_work_receipt"] = " ".join(
             str(work_receipt).split()

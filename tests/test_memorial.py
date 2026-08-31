@@ -143,7 +143,10 @@ def test_revise_pending_updates_ledger_delivery_and_visible_card(
         "_sync_lark_card",
         lambda memorial_id, card: synced.append((memorial_id, card)),
     )
-    mid, _ = memorial.create("eigenflux", "一封来信", "旧正文", preset="fyi")
+    # A 知道就行 letter now waits for the digest; this test is about the
+    # revise path of a card that does reach Lark, so ask for a judgment.
+    mid, _ = memorial.create("eigenflux", "一封来信", "旧正文",
+                             preset="decision")
 
     assert revise_pending(
         mid,
@@ -671,8 +674,15 @@ def test_card_decision_cannot_execute_after_thread_resolution(env, monkeypatch):
 
 
 def test_chat_sends_opener_and_injects_pending_merge(env):
+    # explicit real-time need: a plain mail notice waits for the digest since
+    # 2026-08-31, and this test exercises the chat path of a card that was sent
     mid, _ = memorial.create("mail", "邮件标题", "正文" * 200,
-                             preset="fyi", context="来自 alice 的邮件")
+                             preset="fyi", context="来自 alice 的邮件",
+                             owner_need="requested_result",
+                             why_now="你要的邮件摘要已经整理好",
+                             owner_action="看一眼摘要",
+                             silence_cost="你会错过这封邮件的要点",
+                             work_receipt="读取并整理邮件")
     payload = memorial.chat(mid)
 
     # 1. opener is concise and does not repeat the card body
@@ -1619,13 +1629,14 @@ def test_prose_without_headline_keeps_generic_source_title(env):
 
 
 def test_memorialize_output_does_not_double_wrap_memorial(env):
-    mid, _ = memorial.create("mail", "邮件", "正文", preset="fyi", send=False)
+    mid, _ = memorial.create("mail", "邮件", "正文", preset="decision",
+                             send=False)
     card = memorial.card_json(mid)
     # An existing memorial card passes through for Lark delivery — it is not
     # re-created, and the pass-through keeps the SAME memorial id.
     out = memorial.memorialize_output(card, "mail-triage")
     assert f'"id": "{mid}"' in out or f'"id":"{mid}"' in out
-    assert memorial.get_memorial(mid)["attention"] == "notice"
+    assert memorial.get_memorial(mid)["attention"] == "decision"
     assert len([e for e in _ledger_events(env.dir) if e["ev"] == "create"]) == 1
 
 
@@ -1647,7 +1658,9 @@ def test_decision_on_sentinel_suppressed_body_returns_safe_card(env):
 
 def test_memorialize_output_suppresses_already_delivered_legacy_card(env):
     legacy = build_card("📡 EigenFlux", "同一条动态")
-    first = memorial.memorialize_output(legacy, "eigenflux-feed-triage")
+    # (source must be one that still reaches Lark in real time; a feed-triage
+    # notice has waited for the morning digest since 2026-08-31)
+    first = memorial.memorialize_output(legacy, "heartbeat")
     assert first != ""  # curated signal renders for Lark
     mid = memorial.list_memorials()[-1]["id"]
     assert memorial.get_memorial(mid)["attention"] == "notice"
@@ -2362,8 +2375,10 @@ def test_already_delivered_ledger_card_is_not_replayed(env):
 def _two_ledger_cards():
     ids = []
     for title in ("EigenFlux PGC CI 失败", "EigenFlux PGC PR 测试失败"):
+        # Decision-class so the cards are real-time; a mail notice waits for
+        # the morning digest since 2026-08-31.
         mid, _ = memorial.create(
-            source="mail", title=title, body="正文", attention="notice",
+            source="mail", title=title, body="正文", preset="decision",
             work_receipt="读取并去重邮件，完成重要性判断", send=False)
         ids.append(mid)
     return ids

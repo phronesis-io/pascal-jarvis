@@ -216,7 +216,17 @@ def test_memorial_immediate_delivery_is_visible(monkeypatch, tmp_path):
     assert accepted is True and visible is True
 
 
-def test_private_eigenflux_pm_bypasses_proactive_global_cap(
+def _realtime_eigenflux(monkeypatch):
+    """Transport-mechanics tests: pin the eigenflux notice lane to real time
+    so queueing/recovery paths stay exercised independent of lane policy
+    (which since 2026-08-31 sends a plain letter to the morning digest)."""
+    from core import interruption
+    monkeypatch.setattr(
+        interruption, "REALTIME_NEEDS",
+        interruption.REALTIME_NEEDS | {"external_change"})
+
+
+def test_private_eigenflux_pm_notice_is_ledger_only_and_marked_seen(
     monkeypatch, tmp_path,
 ):
     monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
@@ -234,13 +244,15 @@ def test_private_eigenflux_pm_bypasses_proactive_global_cap(
         "已落账但不打扰", ["evt-suppressed"], {}, "u1",
         [], seen_file, tmp_path, title="EigenFlux 消息")
 
-    assert accepted is True and visible is True
-    assert sent
+    # 2026-08-31: a plain letter is 知道就行 — kept, named on the morning
+    # digest, never a real-time card; the upstream event is still marked seen.
+    assert accepted is True and visible is False
+    assert not sent
+    assert efsl.memorial.list_memorials()[0]["delivery_status"] == "ledger_only"
     assert seen == ["evt-suppressed"]
     assert load_seen(seen_file) == ["evt-suppressed"]
     states = efsl.memorial.list_memorials()
     assert len(states) == 1
-    assert states[0]["delivery_status"] == "delivered"
     assert not (tmp_path / "data" / ".delivery_deadletter.jsonl").exists()
 
 
@@ -281,6 +293,7 @@ def test_eigenflux_aggregate_context_stays_valid_and_bounded():
 def test_memorial_quiet_hours_queue_is_durable_acceptance(
     monkeypatch, tmp_path,
 ):
+    _realtime_eigenflux(monkeypatch)
     monkeypatch.setattr(efsl.memorial, "JARVIS_DIR", tmp_path)
     monkeypatch.setattr(efsl.memorial, "_quiet_hours_now", lambda: True)
     monkeypatch.setenv("JARVIS_DIR", str(tmp_path))

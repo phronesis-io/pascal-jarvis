@@ -292,3 +292,50 @@ def test_model_cannot_enable_auto_accept_when_owner_policy_is_inactive(
     assert len(created) == 1
     assert "临时自动通过策略当前未启用" in created[0]["body"]
     assert created[0]["options"][0]["action"]["params"]["from_uid"] == "456"
+
+
+def test_welcome_failure_never_renders_the_exception(monkeypatch, capsys,
+                                                      tmp_path):
+    """2026-08-29 card body was ``request failed: Get … EOF``."""
+    monkeypatch.setenv("JARVIS_DIR", str(tmp_path))
+
+    def _boom(_self, *args, **kwargs):
+        raise RuntimeError('request failed: Get "https://x/api": EOF')
+
+    monkeypatch.setattr(
+        "core.eigenflux_messages.EigenFluxMessenger.send_to_friend_id", _boom)
+    payload = {
+        "actions": [{
+            "request_id": "123",
+            "decision": "accept",
+            "from_uid": "456",
+            "from_name": "金融 Agent",
+            "remark": "金融 Agent",
+        }],
+        "user_message": "",
+    }
+    pending = _pending({
+        "request_id": "123",
+        "from_uid": "456",
+        "from_name": "金融 Agent",
+        "greeting": "hello",
+    })
+    friends_empty = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"friends": []}), stderr="")
+    friends_present = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"friends": [{
+            "agent_id": "456", "agent_name": "金融 Agent",
+        }]}), stderr="")
+    ok = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"code": 0}), stderr="")
+    empty_history = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"messages": []}), stderr="")
+    results = [pending, friends_empty, ok, friends_present, friends_present]
+    results += [empty_history] * 6
+
+    _calls, output = _run_main(monkeypatch, capsys, payload, results)
+
+    assert "EOF" not in output.out
+    assert "request failed" not in output.out
+    assert "已核验通过" in output.out or "已通过" in output.out
+    assert "EOF" in output.err

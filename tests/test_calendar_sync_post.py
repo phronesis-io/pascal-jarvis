@@ -167,3 +167,48 @@ def test_elapsed_events_resolve_across_month_and_year_boundaries(monkeypatch):
     assert csp.format_change_lines({"01/03|10:00|新年计划"}, set()) == [
         "新增：1/3(周日) 10:00 新年计划"
     ]
+
+
+# ---- 2026-08-31: only a near cancellation/reschedule is an alert ----------
+
+def test_added_event_is_a_notice_not_an_alert(monkeypatch):
+    from tasks.calendar_sync_post import change_attention
+    assert change_attention("新增：9/6(周日) 10:30 dr stretch") == "notice"
+
+
+def test_cancellation_within_two_days_is_an_alert(monkeypatch):
+    import datetime as dt
+    from core import timeutil
+    from tasks import calendar_sync_post as post
+
+    class _Now:
+        @staticmethod
+        def date():
+            return dt.date(2026, 8, 31)
+
+    monkeypatch.setattr(timeutil, "now_local", lambda: _Now)
+    assert post.change_attention("取消：9/1(周二) 14:00 emma") == "alert"
+    assert post.change_attention(
+        "改期：评审 — 8/31(周一) 15:00 → 9/2(周三) 16:00") == "alert"
+    assert post.change_attention("取消：9/20(周日) 10:00 瑜伽") == "notice"
+
+
+def test_change_card_declares_its_attention_and_marker_never_ships(tmp_path,
+                                                                  monkeypatch):
+    import json
+    from core import memorial
+    from core.card import build_card
+
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_owner")
+    monkeypatch.setattr(memorial, "_send_card", lambda *a, **k: "om_cal")
+    card = build_card("📅 日程变动", "新增：9/6(周日) 10:30 dr stretch",
+                      source="calendar-sync", work_receipt="比对日历",
+                      attention="notice")
+    assert json.loads(card)["__jarvis_attention"] == "notice"
+    rendered = memorial.memorialize_output(card, "calendar-sync")
+    state = memorial.list_memorials()[-1]
+    assert state["attention"] == "notice"
+    assert state["delivery_status"] == "ledger_only"
+    assert "__jarvis_attention" not in rendered

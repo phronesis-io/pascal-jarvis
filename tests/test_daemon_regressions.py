@@ -1502,3 +1502,41 @@ def test_absence_receipt_failure_never_kills_the_daemon_loop(tmp_path, monkeypat
     monkeypatch.setattr(absence, "observe", boom)
     daemon_mod._observe_absence(3600)  # must not raise
     assert any(level == "ERROR" for level, _ in logged)
+
+
+def test_self_healing_guardian_message_waits_for_the_digest(
+        tmp_path, monkeypatch):
+    """2026-08-26 owner: 「类似这种我真的…怎么老是这样」 — a message that
+    ends in 我会继续处理 asks nothing of him; it is kept, counted on the
+    morning digest line, and never an alert."""
+    from core import memorial
+
+    captured = []
+    monkeypatch.setattr(daemon_mod, "USER_ID", "ou_owner")
+    monkeypatch.setattr(daemon_mod, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
+    monkeypatch.setattr(daemon_mod, "log", lambda *a, **k: None)
+    monkeypatch.setattr(memorial, "_quiet_hours_now", lambda: False)
+    monkeypatch.setattr(memorial, "_resolve_user_id", lambda: "ou_owner")
+    monkeypatch.setattr(
+        memorial, "_send_card",
+        lambda card, chat_id="": captured.append(card) or "om_guardian",
+    )
+
+    outcome = daemon_mod.notify_lark(
+        "⚠️ EigenFlux 实时消息接收停了。我已经自动重启并复查过，仍未恢复；"
+        "我会继续处理，你暂时不用操作。",
+        incident_key="ef-stream:down")
+    state = memorial.list_memorials()[0]
+    assert state["attention"] == memorial.ATTENTION_NOTICE
+    assert state["delivery_status"] == "ledger_only"
+    assert captured == []
+    # A durable ledger row covers the incident; the daemon must not escalate
+    # to its local banner as if the message were lost.
+    assert outcome is True
+
+    assert daemon_mod.notify_lark(
+        "❌ 我发现系统停了，想自己重启但启动失败了，现在还是停的。",
+        incident_key="restart:failed") is True
+    assert memorial.list_memorials()[-1]["attention"] == memorial.ATTENTION_ALERT
+    assert len(captured) == 1

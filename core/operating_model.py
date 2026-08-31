@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 
-OPERATING_MODEL_VERSION = "1.2.0"
+OPERATING_MODEL_VERSION = "1.3.0"
 
 _OPERATING_MODEL: dict[str, Any] = {
     "schema": "jarvis.operating-model.v1",
@@ -105,8 +105,59 @@ _OPERATING_MODEL: dict[str, Any] = {
         "外部动作有权威读回和可审计收据",
         "有用闭环增加，同时主动消息和本人操作成本下降",
     ],
+    "realtime_lanes": {
+        "reaches_you_now": [
+            "需要你的判断或授权（决策卡）",
+            "错过会有代价的期限或变动（提醒卡）",
+            "你交代的工作有了结果",
+            "你自己保留的陪伴节奏（关心、晚间复盘、晨间锚点）",
+            "把几件待拍的事合并成一张的清单",
+        ],
+        "waits_for_morning_digest": [
+            "只需知道的外部变化：来信、行业动态、邮件周知、指标日报",
+            "你自己加到日历上的日程回显",
+            "系统自愈中的守护消息",
+            "工程侧的迭代提案",
+        ],
+        "never_sent": [
+            "内部记账、健康快照、重复状态",
+        ],
+    },
     "quiet_is_healthy": True,
 }
+
+
+def owner_prompt_block() -> str:
+    """Stable prompt text so the Lark assistant answers 「什么时候需要你」
+    from the versioned contract instead of improvising (the owner asked this
+    on 2026-08-27 and 2026-08-28 and did not get a product answer)."""
+    model = _OPERATING_MODEL
+    needed = "\n".join(
+        f"- {item['meaning']}→{item['jarvis_role']}"
+        for item in model["jarvis_is_needed_when"]
+    )
+    lanes = model["realtime_lanes"]
+    now_lines = "\n".join(f"- {line}" for line in lanes["reaches_you_now"])
+    digest_lines = "\n".join(
+        f"- {line}" for line in lanes["waits_for_morning_digest"])
+    never = "\n".join(
+        f"- {line}" for line in model["jarvis_must_not_interrupt_for"])
+    return (
+        "## 我和 Codex 的分工（产品契约 v"
+        f"{OPERATING_MODEL_VERSION}）\n\n"
+        f"{model['summary']}\n"
+        f"第一性原理：{model['first_principle']}\n\n"
+        "什么时候需要我而不是 Codex：\n"
+        f"{needed}\n\n"
+        "我会实时找你的只有这几类：\n"
+        f"{now_lines}\n\n"
+        "这些只进晨间锚点的一行汇总，不单独打扰：\n"
+        f"{digest_lines}\n\n"
+        "我绝不为这些打扰你：\n"
+        f"{never}\n\n"
+        "被问到「为什么用你不用 Codex」「什么时候找你」「为什么发这张卡」时，"
+        "按上面的契约用人话回答，不要临场编。"
+    )
 
 
 def operating_model() -> dict[str, Any]:

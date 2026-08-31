@@ -61,7 +61,15 @@ def test_memorial_signal_routes_to_lark_and_ambient_to_ledger(
         "一条值得查看的网络更新",
     )
     assert accepted is True
-    assert memorial.get_memorial(memorial_id)["delivery_status"] == "delivered"
+    # 2026-08-31: a 知道就行 brief waits for the morning digest line …
+    assert memorial.get_memorial(memorial_id)["delivery_status"] == "ledger_only"
+    # … while an EigenFlux decision (a letter that needs him) reaches Lark
+    # now. (feed-triage itself is a natural-notice source by design.)
+    decision_id, decision_accepted = memorial.create(
+        "eigenflux", "要不要跟进", "需要你拍一下",
+        preset="decision")
+    assert decision_accepted is True
+    assert memorial.get_memorial(decision_id)["delivery_status"] == "delivered"
 
     ledger_id, ledger_accepted = memorial.create(
         "cross-session-sync", "监控尾气", "只入台账")
@@ -76,9 +84,10 @@ def test_memorial_send_false_leaves_transport_to_the_caller(
     monkeypatch.setattr(memorial, "JARVIS_DIR", tmp_path)
 
     memorial_id, accepted = memorial.create(
-        "eigenflux-feed-triage",
+        "eigenflux",
         "只入库",
         "由调用方管理传输",
+        preset="decision",
         send=False,
     )
 
@@ -103,10 +112,12 @@ def test_heartbeat_adapter_renders_signal_for_lark(
         "CARD:" + card,
         "eigenflux-feed-triage",
     )
-    assert rendered != ""  # curated signal earns the chat (2026-08-03)
+    # 2026-08-31: the brief is adopted with its exact producer source, but
+    # as 知道就行 it renders nothing now and rides the morning digest line.
+    assert rendered == ""
     states = memorial.list_memorials()
     assert [row["source"] for row in states] == ["eigenflux-feed-triage"]
-    assert f'"id": "{states[0]["id"]}"' in rendered
+    assert states[0]["delivery_status"] == "ledger_only"
 
 
 def test_mixed_heartbeat_cards_keep_exact_producer_source(
@@ -125,7 +136,9 @@ def test_mixed_heartbeat_cards_keep_exact_producer_source(
         f"CARD:{eigenflux}\nCARD:{recommendation}",
         "eigenflux-feed-triage,content-recommend",
     )
-    assert len(rendered.splitlines()) == 2  # both render for Lark
+    # Only the recommendation renders now; the feed brief is ledger-only
+    # (2026-08-31) but both memorials keep their exact producer source.
+    assert len(rendered.splitlines()) == 1
     assert {
         row["title"]: row["source"] for row in memorial.list_memorials()
     } == {

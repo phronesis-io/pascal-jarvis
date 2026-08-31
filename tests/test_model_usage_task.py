@@ -116,3 +116,22 @@ def test_tier0_pre_and_post_exchange_the_report_schema(
     monkeypatch.setattr(sys, "stdin", StringIO(encoded))
     assert model_usage_post.main() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_forecast_clause_needs_half_the_window_spent(tmp_path):
+    state = tmp_path / "state.json"
+    issue = {
+        "code": "codex_critical", "route_id": "codex",
+        "limit_id": "codex", "window_name": "primary",
+        "window_label": "7 天", "used_percent": 1.0,
+        "resets_at": "2026-09-06T09:31+08:00",
+        "predicted_exhaustion_at": "2026-09-03T19:26+08:00",
+    }
+    text = render_usage_alert(_report(issues=[issue]), state_path=state)
+    assert "已用 1%" in text
+    assert "用尽" not in text
+    text2 = render_usage_alert(
+        _report(issues=[{**issue, "code": "codex_exhausted",
+                         "used_percent": 92.0}]),
+        state_path=tmp_path / "state2.json")
+    assert "预计 " in text2 and "用尽" in text2

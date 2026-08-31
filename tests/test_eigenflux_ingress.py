@@ -12,6 +12,16 @@ from core.eigenflux_ingress import reconcile_once
 from core.runtime_paths import database_path
 
 
+def _realtime_eigenflux(monkeypatch):
+    """Transport-mechanics tests pin the eigenflux notice lane to real time
+    so recovery/replacement paths stay exercised regardless of lane policy
+    (since 2026-08-31 a plain letter waits for the morning digest)."""
+    from core import interruption
+    monkeypatch.setattr(
+        interruption, "REALTIME_NEEDS",
+        interruption.REALTIME_NEEDS | {"external_change"})
+
+
 def test_eigenflux_inbox_reconcile_task_wires_the_ingress_pre_hook():
     from pathlib import Path
 
@@ -92,7 +102,10 @@ def test_cache_reconciliation_delivers_raw_pm_and_records_msg_id(
 
     assert result.status == "ok"
     assert result.accepted == 1
-    assert sent == [True]
+    # 2026-08-31: a plain letter is 知道就行 — ledger row + morning digest,
+    # no real-time card; the message id is still receipted as seen.
+    assert sent == []
+    assert memorial.list_memorials()[0]["delivery_status"] == "ledger_only"
     assert "msg-1" in load_seen(tmp_path / "eigenflux" / ".ef-seen")
     cards = memorial.list_memorials()
     assert len(cards) == 1
@@ -121,12 +134,13 @@ def test_polling_and_stream_receipts_do_not_double_deliver(
     assert first.accepted == 1
     assert second.accepted == 0
     assert second.already_receipted == 1
-    assert sent == [True]
+    assert sent == []
     assert len(memorial.list_memorials()) == 1
 
 
 def test_proven_keychain_no_send_is_redelivered_after_transport_recovers(
         monkeypatch, tmp_path):
+    _realtime_eigenflux(monkeypatch)
     _installed_cli(monkeypatch)
     sent = _runtime(monkeypatch, tmp_path)
     home = tmp_path / "ef-home"
@@ -162,6 +176,7 @@ def test_proven_keychain_no_send_is_redelivered_after_transport_recovers(
 
 
 def test_closed_memorial_is_never_resurrected(monkeypatch, tmp_path):
+    _realtime_eigenflux(monkeypatch)
     _installed_cli(monkeypatch)
     sent = _runtime(monkeypatch, tmp_path)
     home = tmp_path / "ef-home"
@@ -191,6 +206,7 @@ def test_closed_memorial_is_never_resurrected(monkeypatch, tmp_path):
 
 def test_tool_transcript_card_is_retired_before_safe_raw_replacement(
         monkeypatch, tmp_path):
+    _realtime_eigenflux(monkeypatch)
     _installed_cli(monkeypatch)
     sent = _runtime(monkeypatch, tmp_path)
     home = tmp_path / "ef-home"
@@ -234,6 +250,7 @@ def test_tool_transcript_card_is_retired_before_safe_raw_replacement(
 
 def test_reconcile_bounds_delivery_attempts_and_reports_remaining_gap(
         monkeypatch, tmp_path):
+    _realtime_eigenflux(monkeypatch)
     _installed_cli(monkeypatch)
     sent = _runtime(monkeypatch, tmp_path)
     home = tmp_path / "ef-home"
