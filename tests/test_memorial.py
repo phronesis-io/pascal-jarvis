@@ -2350,3 +2350,131 @@ def test_already_delivered_ledger_card_is_not_replayed(env):
         memorial.card_json(mid), source="mail-triage", require_work_receipt=True)
 
     assert rendered == ""
+
+
+# ── ledger-backed cards never become prose (2026-08-31, T26) ───────────────
+# 8/25 18:24 ×6, 8/26 20:16 ×3, 8/27 17:56 ×5, 8/28 18:11 ×2: every
+# multi-card mail-triage run vanished with exactly one work_receipt_missing
+# and zero delivery envelopes, while single-card runs lived. Whatever demotes
+# a run's cards to prose, a card that byte-matches its own ledger render is
+# provenance-verified and must be delivered, not dropped by the receipt gate.
+
+def _two_ledger_cards():
+    ids = []
+    for title in ("EigenFlux PGC CI 失败", "EigenFlux PGC PR 测试失败"):
+        mid, _ = memorial.create(
+            source="mail", title=title, body="正文", attention="notice",
+            work_receipt="读取并去重邮件，完成重要性判断", send=False)
+        ids.append(mid)
+    return ids
+
+
+def _rendered_ids(rendered: str) -> list[str]:
+    return [memorial._card_memorial_id(json.loads(line))
+            for line in rendered.splitlines() if line.strip()]
+
+
+def _ops_records(capsys, msg: str) -> list[dict]:
+    out = []
+    for line in capsys.readouterr().err.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("msg") == msg:
+            out.append(rec)
+    return out
+
+
+def test_ledger_cards_after_a_stray_prose_line_still_render(env, capsys):
+    ids = _two_ledger_cards()
+    output = "本轮 2 封邮件：\n" + "\n".join(memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+    err = capsys.readouterr().err
+    records = [json.loads(ln) for ln in err.splitlines()
+               if ln.startswith("{")]
+    # The stray line is still gated (and now says what shape it had) …
+    missing = [r for r in records if r.get("msg") == "work_receipt_missing"]
+    assert len(missing) == 1
+    assert missing[0]["line_count"] == 1
+    assert missing[0]["json_lines"] == 0
+    assert missing[0]["first_line_kind"] == "prose"
+    # … and the rescue names what would have demoted the first card (the
+    # second follows a flushed buffer, so it needed no rescue).
+    rescued = [r for r in records if r.get("msg") == "ledger_card_rescued"]
+    assert [r["reason"] for r in rescued] == ["prose_ahead"]
+    assert "正文" not in err  # shape and reason only, never content
+
+
+def test_ledger_cards_inside_an_unclosed_fence_still_render(env):
+    ids = _two_ledger_cards()
+    output = "```\n" + "\n".join(memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+
+
+def test_ledger_cards_behind_a_bad_envelope_are_not_swallowed(env):
+    ids = _two_ledger_cards()
+    output = ("散文一行\nCARD:{\"not\": \"a card\"}\n"
+              + "\n".join(memorial.card_json(m) for m in ids))
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+
+
+def test_indented_ledger_cards_are_rescued_from_markdown_code(env, capsys):
+    ids = _two_ledger_cards()
+    output = "\n".join("    " + memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+    rescued = _ops_records(capsys, "ledger_card_rescued")
+    assert [r["reason"] for r in rescued] == ["markdown_protected"] * 2
+
+
+def test_clean_ledger_cards_are_not_reported_as_rescued(env, capsys):
+    ids = _two_ledger_cards()
+    output = "\n".join(memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert _rendered_ids(rendered) == ids
+    assert _ops_records(capsys, "ledger_card_rescued") == []
+
+
+def test_rescued_ledger_card_is_still_ledger_only_when_not_pushable(
+        env, monkeypatch):
+    ids = _two_ledger_cards()
+    monkeypatch.setattr(memorial, "should_push_to_lark", lambda state: False)
+    output = "前置散文\n" + "\n".join(memorial.card_json(m) for m in ids)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert rendered == ""  # REQ-119: ledger-only stays ledger-only
+
+
+def test_untrusted_card_after_prose_is_still_not_executable(env):
+    """A card that does NOT byte-match its ledger render keeps the old rule:
+    prose ahead of it makes it content, never a live callback."""
+    ids = _two_ledger_cards()
+    card = json.loads(memorial.card_json(ids[0]))
+    card["header"]["title"]["content"] = "篡改过的标题"
+    output = "散文一行\nCARD:" + json.dumps(card, ensure_ascii=False)
+
+    rendered = memorial.memorialize_output(
+        output, source="mail-triage", require_work_receipt=True)
+
+    assert rendered == ""
