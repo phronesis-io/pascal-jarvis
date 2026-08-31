@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.card import build_card
+from core.pgc_outage_probe import apply_backstop
 from core.safety import looks_like_error, parse_json_response, sentinel_present
 
 
@@ -74,7 +75,11 @@ def main() -> int:
     if sentinel_present(raw):
         # Sentinel anywhere = the model chose silence for this cycle (any
         # surrounding prose is scratch work). That's a VALID outcome for
-        # these records — promote, don't re-emit them forever.
+        # these records — promote, don't re-emit them forever. A staged
+        # investigation still goes out as its own card: those numbers came
+        # from the probe, not the model, and must not vanish with its silence.
+        for header, body in apply_backstop(_metrics_dir(), []):
+            _emit(header, body)
         _promote_watermark()
         return 0
     if looks_like_error(raw):
@@ -89,20 +94,30 @@ def main() -> int:
         return 0
 
     cards = parsed.get("cards")
+    rendered = []
     for card in cards if isinstance(cards, list) else []:
         if not isinstance(card, dict):
             continue
         header = str(card.get("header") or "").strip()
         body = str(card.get("body") or "").strip()
         if header and body:
-            print(build_card(
-                _plain_metric_copy(header), _plain_metric_copy(body),
-                source="metrics-digest",
-                work_receipt="聚合运行指标、完成异常归因和重复信号压缩",
-                attention=_metric_attention(header),
-            ))
+            rendered.append((_plain_metric_copy(header), _plain_metric_copy(body)))
+    # Findings from the pre-hook's investigation are put back verbatim if
+    # the model paraphrased them away — and they carry raw source names, so
+    # they bypass the identifier rewrite above on purpose.
+    for header, body in apply_backstop(_metrics_dir(), rendered):
+        _emit(header, body)
     _promote_watermark()
     return 0
+
+
+def _emit(header: str, body: str) -> None:
+    print(build_card(
+        header, body,
+        source="metrics-digest",
+        work_receipt="聚合运行指标、完成异常归因和重复信号压缩",
+        attention=_metric_attention(header),
+    ))
 
 
 if __name__ == "__main__":
