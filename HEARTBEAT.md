@@ -316,6 +316,13 @@ duplicate the common style contract here.
       not add numbers, and never end with「要我…查」— the answer is in the
       body. If `investigation.ok` is false the body already says
       「追查没跑通：<原因>」; keep that line as is.
+    - kind=anomaly whose metric starts with `blind:` → the probe RAN but one
+      of its readings is unreadable (record has `component`, `error`,
+      `since`, and `actual` = days blind). Header「⚠️ <name> 失明 <actual> 天」;
+      body: what cannot be read since when (plain words, no transport
+      codes) and that every number depending on it has been empty since —
+      this is the flip that used to stay silent for a week. No question.
+    - kind=recovery whose metric starts with `blind:` → "✅ <name> 又读到了".
     - kind=absence → missing-report alert card ("⚠️ <name> 日报缺席"): the
       probe produced no daily snapshot by expected_by — say data collection
       itself may be down (ssh/db/upstream), end with "👉 要我现在查就说一声".

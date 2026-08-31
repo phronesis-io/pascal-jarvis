@@ -7,9 +7,17 @@ history records.
 
 Command contract — print ONE JSON object to stdout:
 
-    {"metrics": {"<name>": <number>, ...}, "details": "<free text, optional>"}
+    {"metrics": {"<name>": <number>, ...}, "details": "<free text, optional>",
+     "errors": {"<component>": "<what could not be read>", ...}}
 
-Extra keys are ignored. Failure classification (never raises, per the
+``errors`` (optional) is how a probe says "I ran, but part of me is blind":
+each component becomes a synthetic anomaly on metric ``blind:<component>``
+whose value is the number of days it has been blind (edge-triggered like
+any rule, so the card escalates「失明 N 天」daily until it clears), and one
+recovery signal when the component reads again. 2026-08-25→31 the PGC
+pulse silently reported ``broken_first_party=None`` for six days because
+its metrics endpoint had moved; a metric that quietly disappears must
+become a state flip, not a gap in the 台账. Other extra keys are ignored. Failure classification (never raises, per the
 adapter contract): timeout → "timeout"; non-zero exit → "network";
 unparsable/shapeless stdout → "crash".
 
@@ -217,6 +225,48 @@ def _eval_rules(rules: list, metrics: dict, prev_metrics: dict,
     return tripped, evaluated_clean
 
 
+ERROR_MESSAGE_CAP = 200
+
+
+def _payload_errors(payload: dict) -> dict[str, str]:
+    raw = payload.get("errors")
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for component, message in raw.items():
+        component = str(component or "").strip()
+        message = str(message or "").strip()
+        if component and message:
+            out[component] = message[:ERROR_MESSAGE_CAP]
+    return out
+
+
+def _blind_components(errors: dict, prev_since, now: datetime, ts: str):
+    """(synthetic hits for currently-blind components, [(component, since)]
+    for ones that just recovered, new blind_since state)."""
+    since_map = dict(prev_since) if isinstance(prev_since, dict) else {}
+    hits = []
+    for component, message in errors.items():
+        since = str(since_map.get(component) or ts)
+        since_map[component] = since
+        try:
+            first = datetime.fromisoformat(since)
+            if first.tzinfo is None:
+                first = first.replace(tzinfo=now.tzinfo)
+            days = max(1, (now.date() - first.astimezone(now.tzinfo).date()).days + 1)
+        except ValueError:
+            days = 1
+        metric = f"blind:{component}"
+        hits.append({"metric": metric, "op": ">=", "threshold": 1,
+                     "threshold_desc": "1", "actual": days,
+                     "rule": {"metric": metric, "op": ">=", "value": 1},
+                     "component": component, "error": message, "since": since})
+    recovered = [(c, s) for c, s in since_map.items() if c not in errors]
+    for component, _ in recovered:
+        del since_map[component]
+    return hits, recovered, since_map
+
+
 def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
     command = cfg.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -236,6 +286,7 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
 
     metrics = {k: v for k, v in payload["metrics"].items() if _is_number(v)}
     details = str(payload.get("details") or "").strip()
+    errors = _payload_errors(payload)
 
     now = _now()
     today = now.strftime("%Y-%m-%d")
@@ -251,6 +302,9 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
 
     tripped, evaluated_clean = _eval_rules(
         cfg.get("rules") or [], metrics, prev_metrics, now, history, today)
+    blind_hits, blind_recovered, new_state["blind_since"] = _blind_components(
+        errors, state.get("blind_since"), now, ts)
+    tripped = tripped + blind_hits
     # Alert once per (metric, day); re-alert intraday only if the value got
     # WORSE. The inbox path already dedups via event_id, but history got a
     # record on EVERY 2h pass while a rule stayed tripped — and metrics-digest
@@ -285,25 +339,56 @@ def collect(cfg: dict, state: dict) -> tuple[list[dict], dict]:
         fresh_hits.append(hit)
     new_state_alerted = alerted
     for hit in fresh_hits:
-        title = (f"🚨 {name} 异常: {hit['metric']} {hit['op']} "
-                 f"{hit['threshold_desc']} (当前 {_fmt(hit['actual'])})")
+        if hit.get("error") is not None:
+            title = (f"🚨 {name} 失明: {hit['component']} 读不到，第 "
+                     f"{_fmt(hit['actual'])} 天 — {hit['error']}")
+            body = (f"{hit['component']} 自 {hit['since']} 起读不到: {hit['error']}\n"
+                    f"这段时间里靠它的指标全是空的，不是正常。")
+        else:
+            title = (f"🚨 {name} 异常: {hit['metric']} {hit['op']} "
+                     f"{hit['threshold_desc']} (当前 {_fmt(hit['actual'])})")
+            body = (f"规则: {hit['metric']} {hit['op']} {hit['threshold_desc']}\n"
+                    f"当前值: {_fmt(hit['actual'])}")
         signals.append({
             "event_id": f"anomaly:{hit['metric']}:{today}",
             "ts": ts,
             "title": title,
             "summary": title,
-            "body": f"规则: {hit['metric']} {hit['op']} {hit['threshold_desc']}\n"
-                    f"当前值: {_fmt(hit['actual'])}",
+            "body": body,
             "actor": {"raw": "", "resolved": ""},
             "payload": {"kind": "anomaly", "metric": hit["metric"],
                         "actual": hit["actual"]},
         })
-        _append_history(history, {
+        record = {
             "ts": ts, "date": today, "kind": "anomaly", "name": name,
             "metric": hit["metric"], "rule": hit["rule"], "actual": hit["actual"],
             "threshold": hit["threshold"], "digest_hint": digest_hint,
-        })
+        }
+        if hit.get("error") is not None:
+            record.update({"component": hit["component"], "error": hit["error"],
+                           "since": hit["since"]})
+        _append_history(history, record)
     new_state["alerted_today"] = new_state_alerted
+    for component, since in blind_recovered:
+        # Sight restored: say so once, right away (the digest files ✅ as a
+        # notice), and clear the alert marker so a relapse alerts again.
+        metric = f"blind:{component}"
+        alerted["metrics"].pop(metric, None)
+        title = f"✅ {name} 恢复: {component} 又读到了 (自 {since} 起失明)"
+        signals.append({
+            "event_id": f"recovery:{metric}:{today}",
+            "ts": ts,
+            "title": title,
+            "summary": title,
+            "body": f"{component} 自 {since} 起读不到，本次探测已恢复。",
+            "actor": {"raw": "", "resolved": ""},
+            "payload": {"kind": "recovery", "metric": metric, "actual": 0},
+        })
+        _append_history(history, {
+            "ts": ts, "date": today, "kind": "recovery", "name": name,
+            "metric": metric, "actual": 0, "tripped_on": since[:10],
+            "component": component, "digest_hint": digest_hint,
+        })
 
     snapshot_due = (now.hour >= snapshot_hour
                     and state.get("last_snapshot_date") != today)

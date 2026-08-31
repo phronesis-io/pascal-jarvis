@@ -13,6 +13,20 @@ shipped, superseded, or rejected, and requirements are traced to evidence in
 
 ## [Unreleased]
 
+### Fixed
+
+- PGC 脉搏探针从 8/25 起瞎了六天没人知道：viewer 那天改绑私网地址，探针
+  仍问 127.0.0.1，`broken_first_party` 悄悄变成 None，一手源告警根本触发不了。
+  三处修：① 探针在抓取主机上用 `ss` 找 viewer 真实监听地址（凭据文件是
+  root-only，探针不需要也读不到；/metrics 本就免鉴权），② 探针读不到指标时
+  在输出里明说 `errors`，metrics_probe 连接器把它变成「失明 N 天」的状态翻转
+  卡、恢复时出 ✅（`sources/metrics_probe.py`），③ 一手源追查卡的 /metrics
+  通道同样在主机上取数并只回传要用的三组序列（回程链路慢，整份 200 KB 要
+  10 秒，筛完 3 秒）。
+- 一手源追查卡在「追查时已经恢复」时曾渲染出「None 个一手源」：现在写
+  「N 个一手源曾从 HH:MM 起抓不到数据，追查时已全部恢复（最后一次断连
+  HH:MM）」；告警数字缺失时也不再出现 None/nan。
+
 ### Added
 
 - 「一手源大面积断连」告警卡不再以「要我现在查就说一声」收尾（2026-08-13

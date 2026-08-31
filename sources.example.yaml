@@ -93,6 +93,10 @@ perception:
       collect:
         name: product_growth
         command: "bash data/probes/product_metrics.sh"  # e.g. ssh your-host '...' or a psql wrapper
+        # The command prints {"metrics": {...}, "details": "...", "errors": {...}}.
+        # `errors` = {"<component>": "<why it could not be read>"} for a probe
+        # that ran but is partly blind — each becomes a「失明 N 天」state flip
+        # until it clears (docs/probes/pgc_pulse.example.sh shows the pattern).
         timeout: 45
         snapshot_hour: 10      # daily snapshot on first collect at/after 10:00 local
         digest_hint: |
@@ -113,7 +117,17 @@ perception:
         #   prometheus_url: http://127.0.0.1:9090
         #   prometheus_timeout: 12
         #   metrics_ssh_host: your-crawl-host           # ssh alias; "" = local
-        #   metrics_url: http://127.0.0.1:9090/metrics
+        #   metrics_url: http://127.0.0.1:9090/metrics  # a python program on the
+        #     # crawl host fetches it; if that address is refused it asks `ss`
+        #     # which address listens on the port (the viewer binds
+        #     # PGC_VIEWER_BIND_HOST) and retries there. /metrics is auth-exempt
+        #     # in the viewer; if you do put it behind basic auth, name the
+        #     # env file ON THE CRAWL HOST that holds the credentials — they are
+        #     # read there and never copied into this file:
+        #   metrics_env_file: [/etc/pgc/viewer.env]     # dotenv or systemd Environment= lines
+        #   metrics_auth_user_var: PGC_VIEWER_BASIC_USER
+        #   metrics_auth_password_var: PGC_VIEWER_BASIC_PASSWORD
+        #   metrics_bind_host_var: PGC_VIEWER_BIND_HOST
         #   metrics_timeout: 15
       schedule: { interval: 30m }
       perceive: { buffer: inbox_ops.md }
