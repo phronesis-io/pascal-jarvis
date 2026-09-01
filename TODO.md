@@ -1,4 +1,10 @@
-# Jarvis Roadmap
+# Jarvis Roadmap (Historical)
+
+> [!IMPORTANT]
+> This is the final pre-archive roadmap snapshot, not an active backlog.
+> Pascal Jarvis was archived and became unmaintained on 2026-09-01. Items below
+> that were unfinished are not planned work. See
+> [FINAL_STATUS.md](FINAL_STATUS.md).
 
 > **Current release: v1.15.0 (2026-08-28)** — see `CHANGELOG.md` for the full
 > release history. `docs/prd_portfolio.md` is the authority on which PRDs are

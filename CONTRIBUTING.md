@@ -1,5 +1,10 @@
 # Contributing to Pascal Jarvis
 
+> [!IMPORTANT]
+> This repository was archived on 2026-09-01 and no longer accepts issues,
+> pull requests, fixes, or support requests. The workflow below is retained
+> only as historical documentation. See [FINAL_STATUS.md](FINAL_STATUS.md).
+
 Thanks for helping improve Jarvis! This repo uses a simple collaboration model:
 
 > **Everyone works on their own branch. Only Pascal merges to `main`.**
