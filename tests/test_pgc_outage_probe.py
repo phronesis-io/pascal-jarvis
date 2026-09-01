@@ -372,7 +372,12 @@ def test_pre_reports_failed_investigation_honestly(tmp_path):
     r = _run_pre(tmp_path)
     inv = json.loads(r.stdout.splitlines()[1])["investigation"]
     assert inv["ok"] is False
-    assert inv["card_body"].startswith("144 个一手源从 06:56 起持续抓不到数据。追查没跑通：")
+    # The shell hook intentionally uses the real local clock. On the record's
+    # date it renders only the time; on later dates it includes the month/day.
+    assert inv["card_body"].startswith((
+        "144 个一手源从 06:56 起持续抓不到数据。追查没跑通：",
+        "144 个一手源从 08/31 06:56 起持续抓不到数据。追查没跑通：",
+    ))
     assert "要我" not in inv["card_body"]
 
 
