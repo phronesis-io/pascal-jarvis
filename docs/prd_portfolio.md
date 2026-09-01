@@ -1,5 +1,11 @@
 # Jarvis PRD Portfolio
 
+> [!IMPORTANT]
+> Frozen at project closure. Pascal Jarvis was archived and became unmaintained
+> on 2026-09-01. Labels such as `active`, `pending`, or `next` below describe
+> the final pre-archive state; they are not current commitments. See
+> [the final project conclusion](../FINAL_STATUS.md).
+
 - Last updated: 2026-08-29
 - Status: Authoritative portfolio index
 - Purpose: distinguish current product contracts from historical records,

@@ -1,5 +1,12 @@
 # Pascal Jarvis
 
+> [!WARNING]
+> **Archived and unmaintained since 2026-09-01.** This repository is retained
+> as a historical and technical reference. No fixes, security updates,
+> compatibility work, support, or roadmap development are planned. Do not use
+> it for a new production deployment. See the
+> [final project conclusion](FINAL_STATUS.md).
+
 Codex desktop/mobile is the interactive frontstage. Jarvis is the quiet
 continuity and control plane behind Codex, Claude Code, Lark, and replaceable
 models. It preserves durable Matters, compiles bounded context, runs
@@ -15,7 +22,9 @@ Jarvis 只在工作需要跨任务连续、正确时机、外部变化、异步�
 
 **Release: `v1.15.0` (2026-08-20)** — see [CHANGELOG.md](CHANGELOG.md). 3000+ tests passing.
 
-**Contributing**: everyone works on their own `dev/<name>` branch; Pascal merges to `main`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Contributing**: this archived repository no longer accepts contributions.
+The former workflow is retained for historical reference in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
