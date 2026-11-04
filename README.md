@@ -531,8 +531,9 @@ plugins:
 (see [the plugin README](plugins/eigenflux/README.md#first-time-setup)).
 
 **Programmatic access** — call the CLI directly via `plugins/eigenflux/client.sh`
-(bash) or `python3 -m plugins.eigenflux.feed_search` (Python). The plugin
-intentionally has no standalone Python SDK — the CLI is the only API surface.
+(bash) or `python3 -m plugins.eigenflux.feed_search` (Python). The resident plugin
+uses the CLI. [Private SDK acceptance](plugins/eigenflux/SDK.md) is opt-in and
+runs against a dedicated application, Agent, and isolated database.
 
 ### Writing your own plugin
 
