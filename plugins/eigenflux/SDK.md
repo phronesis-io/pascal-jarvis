@@ -48,5 +48,9 @@ test-inbox receipts prevent repeated notifications after a completed analysis.
 Notifications terminate only in `test-notifications/*.json` under the private
 root. This adapter has no production notification transport or recipient setting.
 
-TODO: owner-selected personal-memory source, external test-channel acceptance,
-and a second natural hourly pull. These are distinct from server cadence checks.
+Acceptance passed with real project documents and owner task constraints, two
+hosted batches separated by a natural hour, two verified analyses and two local
+test notifications. No server clock or quota timestamp was changed.
+
+TODO: optional personal-memory sources, external test-channel transport and a
+resident deployment. The current host needs no existing Jarvis installation.
