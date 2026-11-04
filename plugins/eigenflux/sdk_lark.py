@@ -17,6 +17,8 @@ import threading
 import time
 import uuid
 
+from plugins.eigenflux.sdk_presentation import reports, render_post
+
 
 def message_text(message):
     raw = message.get('content', '{}')
@@ -69,14 +71,21 @@ class Bridge:
     def sequence(self):
         return json.loads((self.root / 'sdk/state.json').read_text())['last_sequence']
 
-    def send(self, key, text, chat, reply=''):
+    def send(self, key, text, chat, reply='', *, post=None, claims=()):
         # Commit intent before the external effect. Ambiguous outcomes are held,
         # never blindly retried after a crash or a network timeout.
         with self.db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS feed_display_claims(value TEXT PRIMARY KEY)")
+            db.execute('BEGIN IMMEDIATE')
+            if any(db.execute('SELECT 1 FROM feed_display_claims WHERE value=?', (x,)).fetchone() for x in claims):
+                return False
             if not db.execute("INSERT OR IGNORE INTO effects(key,status) VALUES(?,'unknown')", (key,)).rowcount:
                 return False
+            db.executemany('INSERT INTO feed_display_claims VALUES(?)', [(x,) for x in claims])
         body = {'msg_type': 'text', 'content': json.dumps({'text': text[:12000]}, ensure_ascii=False),
                 'uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, self.profile + ':' + key))}
+        if post is not None:
+            body.update(msg_type='post', content=json.dumps(post, ensure_ascii=False))
         if reply:
             if not re.fullmatch(r'om_[A-Za-z0-9_-]+', reply):
                 return False
@@ -164,14 +173,20 @@ class Bridge:
         binding = self.bound()
         if not binding:
             return
+        with self.db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS feed_display_claims(value TEXT PRIMARY KEY)")
+            seen = {r[0] for r in db.execute('SELECT value FROM feed_display_claims')}
         with contextlib.closing(sqlite3.connect('file:' + str(self.root / 'data/jarvis.db') + '?mode=ro', uri=True)) as db:
-            rows = db.execute('SELECT r.sequence,r.batch_id,a.result_json FROM eigenflux_sdk_receipts r JOIN eigenflux_sdk_analyses a USING(batch_id) WHERE r.sequence>? ORDER BY r.sequence', (binding['baseline'],)).fetchall()
-        for seq, bid, raw in rows:
-            result = json.loads(raw)
-            if result['notify']:
-                lines = ['SDK Feed 第 ' + str(seq) + ' 批', result['summary']]
-                lines += [x['item_id'] + '：' + x['reason'] for x in result['recommendations']]
-                self.send('feed:' + bid, '\n\n'.join(lines), binding['chat'])
+            rows = db.execute('SELECT r.sequence,r.batch_id,a.result_json,p.feed_json FROM eigenflux_sdk_receipts r JOIN eigenflux_sdk_analyses a USING(batch_id) JOIN eigenflux_sdk_payloads p USING(batch_id) WHERE r.sequence>? ORDER BY r.sequence', (binding['baseline'],)).fetchall()
+        for seq, bid, raw, payload in rows:
+            with self.db() as db:
+                if db.execute('SELECT 1 FROM effects WHERE key=?', ('feed:' + bid,)).fetchone():
+                    continue
+            selected = reports(json.loads(raw), json.loads(payload), seen)
+            if selected:
+                claims = [k for _, _, keys in selected for k in keys]
+                self.send('feed:' + bid, '', binding['chat'], post=render_post(selected), claims=claims)
+                seen.update(claims)
 
 
 def main():

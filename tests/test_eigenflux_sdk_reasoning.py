@@ -26,7 +26,7 @@ def root(tmp_path, monkeypatch):
 def outcome(text=None, status="succeeded"):
     return SimpleNamespace(status=status, call_id="synthetic-call", provider="fixture", model="fixture",
                            text=text or json.dumps({"summary": "相关技术信号", "recommendations": [
-                               {"item_id": "100", "reason": "Matches the supplied robotics goal"}], "notify": True}))
+                               {"item_id": "100", "title": "机器人更新", "source_summary": "一项具体变化", "reason": "Matches the supplied robotics goal"}], "notify": True}))
 
 
 def test_reasoning_and_test_notification_are_idempotent(root):
@@ -88,3 +88,20 @@ def test_explicit_context_import_is_read_only_and_bounded(tmp_path):
     source.write_text("auth_token=synthetic-secret")
     with pytest.raises(ValueError):
         import_context(tmp_path, [source])
+
+
+def test_next_batch_excludes_already_recommended_content(root):
+    consume(root, lambda *a, **k: outcome())
+    with jarvis_db.independent_connection() as db:
+        payload=db.execute('SELECT feed_json FROM eigenflux_sdk_payloads LIMIT 1').fetchone()[0]
+        db.execute("INSERT INTO eigenflux_sdk_receipts SELECT 'next-batch',agent_id,sequence+1,payload_hash,receipt FROM eigenflux_sdk_receipts LIMIT 1")
+        db.execute("INSERT INTO eigenflux_sdk_payloads VALUES('next-batch',?)", (payload,))
+        db.commit()
+    def model(prompt, **kwargs):
+        data=json.loads(prompt)
+        assert data['untrusted_feed']['items']==[]
+        assert data['untrusted_previous_recommendations']
+        assert data['current_time_utc'].endswith('Z')
+        return outcome(json.dumps({'summary':'','recommendations':[],'notify':False}))
+    assert consume(root,model)==2
+    assert len(list((root/'test-notifications').glob('*.json')))==1

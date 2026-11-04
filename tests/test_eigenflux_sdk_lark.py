@@ -26,7 +26,8 @@ def bridge(tmp_path):
         'code_hash': hashlib.sha256(b'private-code').hexdigest(), 'expires_at': 200}))
     with sqlite3.connect(tmp_path / 'data/jarvis.db') as db:
         db.executescript('''CREATE TABLE eigenflux_sdk_receipts(batch_id TEXT, sequence INTEGER);
-            CREATE TABLE eigenflux_sdk_analyses(batch_id TEXT, result_json TEXT);''')
+            CREATE TABLE eigenflux_sdk_analyses(batch_id TEXT, result_json TEXT);
+            CREATE TABLE eigenflux_sdk_payloads(batch_id TEXT, feed_json TEXT);''')
     calls = []
     def run(args, **kwargs):
         calls.append((args, kwargs))
@@ -126,15 +127,20 @@ def test_model_failure_never_claims_success(bridge):
 
 def test_notifications_skip_history_and_deduplicate_after_restart(bridge):
     bind(bridge)
-    result=json.dumps({'summary':'summary','notify':True,'recommendations':[{'item_id':'1','reason':'useful'}]})
+    result=json.dumps({'summary':'summary','notify':True,'recommendations':[{'item_id':'1','title':'更新','source_summary':'一个具体变化','reason':'useful'}]})
     with sqlite3.connect(bridge.root/'data/jarvis.db') as db:
         for seq in [3,4]:
             db.execute('INSERT INTO eigenflux_sdk_receipts VALUES(?,?)',(str(seq),seq))
             db.execute('INSERT INTO eigenflux_sdk_analyses VALUES(?,?)',(str(seq),result))
+            db.execute('INSERT INTO eigenflux_sdk_payloads VALUES(?,?)',(str(seq),json.dumps({'items':[{'item_id':'1','summary':'new'}]})))
     bridge.notifications()
     Bridge(bridge.root,bridge.profile,run=bridge.run).notifications()
     assert len(bridge.calls) == 2
-    assert '第 4 批' in json.loads(json.loads(bridge.calls[-1][1]['input'])['content'])['text']
+    body=json.loads(bridge.calls[-1][1]['input'])
+    assert body['msg_type']=='post'
+    post=json.loads(body['content'])
+    assert post['zh_cn']['content'][0][0]['href'].endswith('/1')
+    assert '第 4 批' not in body['content']
 
 
 def test_feishu_rich_text_binding_and_reply(bridge):
@@ -174,3 +180,28 @@ def test_database_connections_close_on_every_poll(bridge,monkeypatch):
     for connection in closed:
         with pytest.raises(sqlite3.ProgrammingError):
             connection.execute('select 1')
+
+
+def test_duplicate_content_across_batches_and_silence(bridge):
+    bind(bridge)
+    result={'summary':'','notify':True,'recommendations':[{'item_id':'1','title':'变化','source_summary':'原始事实','reason':'具体关联'}]}
+    with sqlite3.connect(bridge.root/'data/jarvis.db') as db:
+        for seq in [4,5]:
+            item_id=str(seq)
+            value=dict(result,recommendations=[dict(result['recommendations'][0],item_id=item_id)])
+            db.execute('INSERT INTO eigenflux_sdk_receipts VALUES(?,?)',(item_id,seq))
+            db.execute('INSERT INTO eigenflux_sdk_analyses VALUES(?,?)',(item_id,json.dumps(value)))
+            db.execute('INSERT INTO eigenflux_sdk_payloads VALUES(?,?)',(item_id,json.dumps({'items':[{'item_id':item_id,'summary':'same substance'}]})))
+    bridge.notifications()
+    assert len(bridge.calls)==2
+    Bridge(bridge.root,bridge.profile,run=bridge.run).notifications()
+    assert len(bridge.calls)==2
+
+
+def test_ambiguous_feed_send_reserves_content(bridge):
+    bind(bridge)
+    bridge.run=lambda *a,**k: (_ for _ in ()).throw(subprocess.TimeoutExpired('lark-cli',30))
+    assert not bridge.send('feed:one','', 'oc_test',post={'zh_cn':{}},claims=('item:1','content:one'))
+    with bridge.db() as db:
+        assert db.execute('select count(*) from feed_display_claims').fetchone()[0]==2
+    assert not bridge.send('feed:two','', 'oc_test',claims=('content:one',))
