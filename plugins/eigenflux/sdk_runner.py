@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--poll-seconds", type=int, default=3600)
     parser.add_argument("--seconds", type=int, default=300)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--auto-update", action="store_true", help="enable signed core updates for configured release wheels")
     args = parser.parse_args()
     root = args.root.resolve()
     repo = Path(__file__).resolve().parents[2]
@@ -60,7 +61,7 @@ def main():
         with Client(base_url=args.base_url, app_credential=credential.read_text().strip(),
                     external_agent_id=args.agent_id, runtime_name="jarvis",
                     runtime_version=args.runtime_version, state_dir=root / "sdk",
-                    feed_poll_interval_seconds=args.poll_seconds, auto_update=False,
+                    feed_poll_interval_seconds=args.poll_seconds, auto_update=args.auto_update,
                     context_provider=lambda: read_context(args.context_file, root),
                     push_to_agent=inbox.push_to_agent, delivery_status=inbox.delivery_status,
                     on_status=on_status) as client:

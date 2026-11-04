@@ -107,3 +107,32 @@ def test_database_must_match_explicit_root(tmp_path, monkeypatch):
     monkeypatch.setattr(jarvis_db, "DB_PATH", tmp_path / "other.db")
     with pytest.raises(ValueError):
         JarvisInbox(tmp_path)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_runner_update_opt_in_reaches_sdk_without_changing_identity(inbox, tmp_path, monkeypatch, enabled):
+    import sys
+    from plugins.eigenflux import sdk_runner
+    credential = tmp_path / 'credential'
+    credential.write_text('synthetic-credential')
+    credential.chmod(0o600)
+    context = tmp_path / 'context.json'
+    context.write_text('{"summary":"synthetic context"}')
+    captured = {}
+    class Client:
+        def __init__(self, **kwargs): captured.update(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def wait_until_registered(self, **kwargs): pass
+    monkeypatch.setattr(sdk, 'Client', Client)
+    monkeypatch.setattr(sdk_runner.signal, 'signal', lambda *args: None)
+    argv = ['sdk_runner', '--root', str(tmp_path), '--credential-file', str(credential),
+            '--context-file', str(context), '--agent-id', 'stable-test-agent',
+            '--poll-seconds', '600', '--seconds', '0']
+    if enabled: argv.append('--auto-update')
+    monkeypatch.setattr(sys, 'argv', argv)
+    sdk_runner.main()
+    assert captured['auto_update'] is enabled
+    assert captured['external_agent_id'] == 'stable-test-agent'
+    assert captured['state_dir'] == tmp_path / 'sdk'
+    assert captured['feed_poll_interval_seconds'] == 600
