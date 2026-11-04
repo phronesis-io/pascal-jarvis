@@ -56,7 +56,7 @@ class Bridge:
 
     @contextlib.contextmanager
     def db(self):
-        with sqlite3.connect(self.database) as db:
+        with contextlib.closing(sqlite3.connect(self.database)) as db, db:
             db.row_factory = sqlite3.Row
             db.execute('PRAGMA synchronous=FULL')
             yield db
@@ -145,7 +145,7 @@ class Bridge:
             context = read_context(self.root / 'context.json', self.root)
             with self.db() as db:
                 history = [dict(row) for row in db.execute('SELECT question,answer FROM turns ORDER BY rowid DESC LIMIT 3')][::-1]
-            with sqlite3.connect('file:' + str(self.root / 'data/jarvis.db') + '?mode=ro', uri=True) as db:
+            with contextlib.closing(sqlite3.connect('file:' + str(self.root / 'data/jarvis.db') + '?mode=ro', uri=True)) as db:
                 row = db.execute('SELECT result_json FROM eigenflux_sdk_analyses ORDER BY rowid DESC LIMIT 1').fetchone()
                 analysis = json.loads(row[0]) if row else None
             outcome = (self.model or run_codex_model)(json.dumps({'owner_context': context, 'recent_turns': history,
@@ -164,7 +164,7 @@ class Bridge:
         binding = self.bound()
         if not binding:
             return
-        with sqlite3.connect('file:' + str(self.root / 'data/jarvis.db') + '?mode=ro', uri=True) as db:
+        with contextlib.closing(sqlite3.connect('file:' + str(self.root / 'data/jarvis.db') + '?mode=ro', uri=True)) as db:
             rows = db.execute('SELECT r.sequence,r.batch_id,a.result_json FROM eigenflux_sdk_receipts r JOIN eigenflux_sdk_analyses a USING(batch_id) WHERE r.sequence>? ORDER BY r.sequence', (binding['baseline'],)).fetchall()
         for seq, bid, raw in rows:
             result = json.loads(raw)

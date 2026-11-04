@@ -156,3 +156,21 @@ def test_unsupported_post_elements_fail_closed(bridge,content):
     e=event('unused');e['event']['message'].update(message_type='post',content=json.dumps(content))
     assert not bridge.handle(e)
     assert not bridge.calls
+
+
+def test_database_connections_close_on_every_poll(bridge,monkeypatch):
+    real_connect=sqlite3.connect
+    closed=[]
+    class Connection(sqlite3.Connection):
+        def close(self):
+            closed.append(self)
+            return super().close()
+    def connect(*a,**kw):
+        return real_connect(*a,**kw,factory=Connection)
+    monkeypatch.setattr('plugins.eigenflux.sdk_lark.sqlite3.connect',connect)
+    for _ in range(150):
+        bridge.notifications()
+    assert len(closed)==150
+    for connection in closed:
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute('select 1')
