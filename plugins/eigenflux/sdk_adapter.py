@@ -55,6 +55,10 @@ class JarvisInbox:
                     bookmark_id INTEGER NOT NULL REFERENCES bookmarks(id),
                     PRIMARY KEY(agent_id,item_id)
                 );
+                CREATE TABLE IF NOT EXISTS eigenflux_sdk_payloads (
+                    batch_id TEXT PRIMARY KEY REFERENCES eigenflux_sdk_receipts(batch_id),
+                    feed_json TEXT NOT NULL
+                );
             """)
         expected.chmod(0o600)
 
@@ -75,6 +79,9 @@ class JarvisInbox:
                 db.execute("BEGIN IMMEDIATE")
                 row = self._receipt(db, delivery)
                 if row:
+                    db.execute("INSERT OR IGNORE INTO eigenflux_sdk_payloads VALUES(?,?)",
+                               (delivery.batch_id, json.dumps(delivery.feed)))
+                    db.commit()
                     return DeliveryResult.accepted(row["receipt"])
                 for item in delivery.items:
                     item_id = str(item["item_id"])
@@ -97,6 +104,8 @@ class JarvisInbox:
                 receipt = "jarvis-bookmarks:" + delivery.batch_id
                 db.execute("INSERT INTO eigenflux_sdk_receipts VALUES(?,?,?,?,?)", (
                     delivery.batch_id, delivery.agent_id, delivery.sequence, fingerprint(delivery), receipt))
+                db.execute("INSERT INTO eigenflux_sdk_payloads VALUES(?,?)",
+                           (delivery.batch_id, json.dumps(delivery.feed)))
                 db.commit()
             return DeliveryResult.accepted(receipt)
         except Exception:

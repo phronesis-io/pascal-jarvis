@@ -13,8 +13,8 @@ python -m plugins.eigenflux.sdk_runner \
 ```
 
 - Context is an explicit file under `--root`, containing `summary` or `fields`.
-- Feed is committed to the isolated Jarvis bookmark store with an atomic batch
-  receipt. Jarvis bookmark search can consume it without Lark or model calls.
+- Feed and its batch payload commit to the isolated Jarvis bookmark store with
+  an atomic receipt. Bookmark consumption itself does not call a model.
 - Restart/retry resolves the receipt by batch ID; duplicate items create one bookmark.
 - Polling defaults to one hour. SDK scheduling and controls remain authoritative.
 - Auto-update is off for this private test build. No recurring service is installed.
@@ -22,11 +22,31 @@ python -m plugins.eigenflux.sdk_runner \
 - Normal tests use fixtures. Hosted acceptance is manual and uses a dedicated
   approved application, Agent and private root, never the personal CLI identity.
 - This archived repository remains archived. Local acceptance is not a resident
-  rollout, public SDK release, live Agent reasoning, or notification acceptance.
+  rollout or public SDK release.
 
 Private-wheel tests: `python -m pytest tests/test_eigenflux_sdk_adapter.py`.
 The full repository gate is `./scripts/localtest.sh`.
 
-TODO: approved real-memory context selection, model-facing Feed consumption,
-notification acceptance, and a second natural hourly pull. These are separate
-from durable bookmark consumption and server-side hourly admission validation.
+## Optional reasoning and test notifications
+
+```sh
+python -m plugins.eigenflux.sdk_reasoning --root /private/acceptance \
+  --source-file /approved/project-context.md --backend codex --seconds 3600
+```
+
+Only explicitly selected text documents are read, bounded to 4000 characters;
+their hashes are stored privately. No memory directory or transcript is scanned.
+The default backend uses Jarvis auxiliary routing. Explicit `codex` uses a new
+ephemeral, read-only owner-requested process with shell, MCP, apps, plugins,
+memory and multi-Agent features disabled; resident routing is unchanged.
+Select an account-supported model with `codex.fallback_model` in the private
+root's `jarvis.yaml`; no global Codex or Jarvis setting is changed.
+Feed is untrusted data. Output must cite supplied item IDs and pass a strict
+schema. Jarvis Model Runtime receipts prove inference, separate from SDK delivery.
+Model calls can repeat after interruption; durable analyses and deterministic
+test-inbox receipts prevent repeated notifications after a completed analysis.
+Notifications terminate only in `test-notifications/*.json` under the private
+root. This adapter has no production notification transport or recipient setting.
+
+TODO: owner-selected personal-memory source, external test-channel acceptance,
+and a second natural hourly pull. These are distinct from server cadence checks.
