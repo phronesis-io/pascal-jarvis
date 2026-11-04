@@ -54,3 +54,21 @@ test notifications. No server clock or quota timestamp was changed.
 
 TODO: optional personal-memory sources, external test-channel transport and a
 resident deployment. The current host needs no existing Jarvis installation.
+
+## Isolated Lark application bridge
+
+`python -m plugins.eigenflux.sdk_lark --root <private-test-state> --profile <named-lark-profile>`
+uses a dedicated application and the CLI's credential store. One private DM is
+paired using a short-lived, hashed `/bind` code. Other users and group chats are
+ignored. `/status` reports SDK state; ordinary text uses the existing text-only
+Codex adapter and bounded conversation history. No tool execution is enabled.
+SDK recommendations produced after pairing are sent to the paired DM; historical
+batches are not replayed. Model calls and successful message IDs are persisted.
+
+Outbound intent is durable before sending. Timeout, process interruption, API
+rejection or missing receipt stays unknown and is not automatically resent.
+Operators inspect `data/sdk-lark.db`; users can resend a failed question as a new
+message. A deterministic API UUID also identifies each send. The bridge uses one
+OS-backed lock and one event subscription; no full Jarvis daemon or personal
+heartbeat is started. Stop its dedicated launch agent to disconnect it. Buttons,
+attachments, group conversations and external actions are outside this test.
