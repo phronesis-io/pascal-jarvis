@@ -1,7 +1,7 @@
 # Isolated SDK integration
 
 Opt-in acceptance adapter; the resident CLI plugin and heartbeat are unchanged.
-Install the private binary wheel in a dedicated virtualenv. Do not add the SDK
+Install the published proprietary binary wheel in a dedicated virtualenv. Do not add the SDK
 source, wheel, application credential or runtime data to this repository.
 
 ```sh
@@ -17,14 +17,14 @@ python -m plugins.eigenflux.sdk_runner \
   an atomic receipt. Bookmark consumption itself does not call a model.
 - Restart/retry resolves the receipt by batch ID; duplicate items create one bookmark.
 - Polling defaults to one hour. SDK scheduling and controls remain authoritative.
-- Auto-update is off for this private test build. No recurring service is installed.
+- Signed core auto-update is opt-in via `--auto-update`. No recurring service is installed by these modules.
 - `status.json` is diagnostic; `snapshot.json` reports durable local consumption.
 - Normal tests use fixtures. Hosted acceptance is manual and uses a dedicated
   approved application, Agent and private root, never the personal CLI identity.
-- This archived repository remains archived. Local acceptance is not a resident
-  rollout or public SDK release.
+- The repository is reopened for review of this isolated integration. Acceptance
+  does not roll out the SDK to other Jarvis instances.
 
-Private-wheel tests: `python -m pytest tests/test_eigenflux_sdk_adapter.py`.
+Published-wheel tests: `python -m pytest tests/test_eigenflux_sdk_adapter.py`.
 The full repository gate is `./scripts/localtest.sh`.
 
 ## Optional reasoning and test notifications
@@ -45,15 +45,15 @@ Feed is untrusted data. Output must cite supplied item IDs and pass a strict
 schema. Jarvis Model Runtime receipts prove inference, separate from SDK delivery.
 Model calls can repeat after interruption; durable analyses and deterministic
 test-inbox receipts prevent repeated notifications after a completed analysis.
-Notifications terminate only in `test-notifications/*.json` under the private
-root. This adapter has no production notification transport or recipient setting.
+The reasoning module writes only `test-notifications/*.json` under the private
+root. The separately enabled Lark bridge below can deliver to one paired test DM.
 
 Acceptance passed with real project documents and owner task constraints, two
 hosted batches separated by a natural hour, two verified analyses and two local
 test notifications. No server clock or quota timestamp was changed.
 
-TODO: optional personal-memory sources, external test-channel transport and a
-resident deployment. The current host needs no existing Jarvis installation.
+TODO: optional personal-memory sources and a separately authorized production
+rollout. The current host needs no existing Jarvis installation.
 
 ## Isolated Lark application bridge
 
@@ -72,3 +72,19 @@ message. A deterministic API UUID also identifies each send. The bridge uses one
 OS-backed lock and one event subscription; no full Jarvis daemon or personal
 heartbeat is started. Stop its dedicated launch agent to disconnect it. Buttons,
 attachments, group conversations and external actions are outside this test.
+
+
+## Presentation and installation
+
+Use the platform wheel from [SDK 0.1.2](https://github.com/phronesis-io/eigenflux-sdk-distribution/releases/tag/v0.1.2).
+Linux and macOS amd64/arm64 are supported; macOS requires 12 or later. Go source
+remains private. Python wrappers and launchers upgrade by reinstalling the wheel;
+`--auto-update` updates the signed Go core only.
+
+The Lark bridge presents grounded source links, faithful Chinese summaries and
+specific owner relevance. Internal IDs and batch diagnostics stay private.
+Duplicate or low-value content stays silent. See [presentation policy](../../docs/sdk-feed-presentation.md).
+
+Hosted acceptance verified signed HTTPS upgrades and isolated startup rollback.
+Only synthetic fixtures run in CI; both Python jobs install the public Linux
+wheel with a pinned SHA256 so SDK tests cannot silently skip for a missing package.

@@ -30,7 +30,10 @@ jobs:
       - name: Install dependencies
         # requirements.txt (not a hand-picked subset) — a missing runtime dep
         # makes its test module silently skip and broken PRs merge green.
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install -r requirements-dev.txt
+          pip install --no-deps 'https://github.com/phronesis-io/eigenflux-sdk-distribution/releases/download/v0.1.2/eigenflux_sdk-0.1.2-py3-none-manylinux_2_17_x86_64.whl#sha256=94f364e0043376314720f6aafd00f3ee90ab31cf2e70b1939cb07265b9d86372'
+          python -c "import eigenflux_sdk; from importlib.metadata import version; assert version('eigenflux-sdk') == '0.1.2'"
 
       - name: Shell syntax
         run: |
@@ -79,7 +82,10 @@ jobs:
           echo Asia/Shanghai | sudo tee /etc/timezone
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install -r requirements-dev.txt
+          pip install --no-deps 'https://github.com/phronesis-io/eigenflux-sdk-distribution/releases/download/v0.1.2/eigenflux_sdk-0.1.2-py3-none-manylinux_2_17_x86_64.whl#sha256=94f364e0043376314720f6aafd00f3ee90ab31cf2e70b1939cb07265b9d86372'
+          python -c "import eigenflux_sdk; from importlib.metadata import version; assert version('eigenflux-sdk') == '0.1.2'"
 
       - name: Run compatibility tests
         run: python -m pytest tests/
