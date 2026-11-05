@@ -27,6 +27,11 @@ and wired straight into the heartbeat task system and `bot.sh`:
   generated files in `skills/` directly. Edit upstream for shared behavior or
   `overlays/` for a Jarvis-only safety contract; the tracker re-composes them.
 
+An optional [SDK acceptance adapter](SDK.md) runs separately from this
+resident CLI plugin. It uses an isolated database and installs no heartbeat,
+stream, notification, or background service by default. An explicitly enabled
+Lark bridge delivers only to its paired test DM.
+
 ## Layout
 
 ```
